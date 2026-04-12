@@ -1,0 +1,24 @@
+[2026-04-12 11:02:02] Log file: ./results/defense_cifar10_mobilenet_ig_20260412_110202.log
+[2026-04-12 11:02:02] Device: cuda
+[2026-04-12 11:02:02] Args: {'dataset': 'cifar10', 'model': 'mobilenet', 'attack': 'ig', 'n_samples': 10, 'checkpoint': './checkpoints/cifar10_mobilenet.pth', 'output_dir': './results', 'seed': 42}
+[2026-04-12 11:02:02] Loading LPIPS model (alex)...
+[2026-04-12 11:02:03] LPIPS ready.
+[2026-04-12 11:02:03] Loading dataset: cifar10  (n_samples=10)
+[2026-04-12 11:02:04] Dataset ready: 10 images selected.
+[2026-04-12 11:02:04] Building model: mobilenet  num_classes=10
+[2026-04-12 11:02:04] No checkpoint found — using random weights (demo mode).
+[2026-04-12 11:02:04] 
+Total plan: 1 attack × 7 conditions × 10 images = 70 jobs
+[2026-04-12 11:02:04] 
+================================================================
+[2026-04-12 11:02:04] ATTACK: IG
+[2026-04-12 11:02:04] ================================================================
+[2026-04-12 11:02:04] 
+  ── Condition 1/7: none/no-defense ──
+[2026-04-12 11:02:04]       [none/no-defense] img 1/10 — computing true gradient...
+[2026-04-12 11:02:05]       [none/no-defense] img 1/10 — applying defense: none ...
+[2026-04-12 11:02:05]       [none/no-defense] img 1/10 — running IG attack...
+[2026-04-12 11:02:05]         [IG] restart 1/1 — 500 iterations ...
+[2026-04-12 11:02:16]         [IG] iter    50/500  loss=0.9824  elapsed=12s  ETA=105s
+[2026-04-12 11:02:28]         [IG] iter   100/500  loss=0.9796  elapsed=23s  ETA=92s
+[2026-04-12 11:02:39]         [IG] iter   150/500  loss=0.9823  elapsed=34s  ETA=80s

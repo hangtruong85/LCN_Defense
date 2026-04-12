@@ -1,0 +1,9 @@
+[2026-04-12 13:43:31] Log file: ./results/defense_tinyimagenet_resnet18_idlg_20260412_134331.log
+[2026-04-12 13:43:31] Device: cuda
+[2026-04-12 13:43:31] Args: {'dataset': 'tinyimagenet', 'model': 'resnet18', 'attack': 'idlg', 'n_samples': 2, 'checkpoint': './checkpoints/tinyimagenet_resnet18.pth', 'tinyimagenet_dir': None, 'output_dir': './results', 'seed': 42}
+[2026-04-12 13:43:31] Loading LPIPS model (alex)...
+[2026-04-12 13:43:32] LPIPS ready.
+[2026-04-12 13:43:32] Loading dataset: tinyimagenet  (n_samples=2)
+[2026-04-12 13:43:32] Tiny-ImageNet not found locally — downloading...
+[2026-04-12 13:43:32] Zip already exists: ./data/tiny-imagenet-200.zip
+[2026-04-12 13:43:32] Extracting to ./data/tiny-imagenet-200 ...
