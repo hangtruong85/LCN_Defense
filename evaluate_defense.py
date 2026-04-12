@@ -174,7 +174,6 @@ def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
             root="./data", train=False, download=True, transform=transform)
     elif name == "tinyimagenet":
         transform = transforms.Compose([
-            transforms.Resize(64),
             transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406),
                                   (0.229, 0.224, 0.225)),
@@ -319,18 +318,24 @@ def _num_classes(model):
 def _save_image_pair(orig_tensor, rec_tensor, save_dir,
                      defense, param, img_idx, attack_type):
     """
-    Save original and reconstructed images side-by-side as PNG.
+    Save original and reconstructed images at native resolution (no resize).
     Folder structure:
         save_dir/
-            orig/   img_001.png ...
-            <defense>_<param>/   img_001.png ...
-            comparison/   img_001_<defense>_<param>.png  (side-by-side)
+            orig/        img_001.png  ...
+            <cond>/      img_001.png  ...
+            comparison/  img_001_<cond>.png  (side-by-side, no padding)
     """
-    import os
-    def _unnorm(t):
+    from PIL import Image as PILImage
+    import numpy as np
+
+    def _to_pil(t):
+        """CHW tensor → PIL Image at native resolution."""
         t = t.detach().cpu().float()
         t = (t - t.min()) / (t.max() - t.min() + 1e-8)
-        return t.clamp(0, 1)
+        t = t.clamp(0, 1)
+        # CHW → HWC, scale to uint8
+        arr = (t.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        return PILImage.fromarray(arr)
 
     param_str = str(param).replace(".", "p") if param is not None else "none"
     cond_str  = f"{defense}_{param_str}"
@@ -341,19 +346,22 @@ def _save_image_pair(orig_tensor, rec_tensor, save_dir,
     for d in [orig_dir, rec_dir, cmp_dir]:
         os.makedirs(d, exist_ok=True)
 
-    fname = f"img_{img_idx:03d}_{attack_type}.png"
-
-    orig_u = _unnorm(orig_tensor)
-    rec_u  = _unnorm(rec_tensor)
-
-    vutils.save_image(orig_u, os.path.join(orig_dir, fname))
-    vutils.save_image(rec_u,  os.path.join(rec_dir,  fname))
-
-    # Side-by-side: [orig | reconstructed]
-    grid = vutils.make_grid(
-        torch.stack([orig_u, rec_u]), nrow=2, padding=2, pad_value=1.0)
+    fname     = f"img_{img_idx:03d}_{attack_type}.png"
     cmp_fname = f"img_{img_idx:03d}_{cond_str}_{attack_type}.png"
-    vutils.save_image(grid, os.path.join(cmp_dir, cmp_fname))
+
+    orig_pil = _to_pil(orig_tensor)
+    rec_pil  = _to_pil(rec_tensor)
+
+    # Save individual images at exact native resolution
+    orig_pil.save(os.path.join(orig_dir, fname))
+    rec_pil.save(os.path.join(rec_dir,  fname))
+
+    # Side-by-side comparison: concat horizontally, NO padding, NO resize
+    W, H = orig_pil.size
+    cmp  = PILImage.new("RGB", (W * 2, H))
+    cmp.paste(orig_pil, (0,  0))
+    cmp.paste(rec_pil,  (W,  0))
+    cmp.save(os.path.join(cmp_dir, cmp_fname))
 
 
 # ─────────────────────────────────────────────
@@ -363,14 +371,21 @@ def run_evaluation(args):
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Init log file
-    os.makedirs(args.output_dir, exist_ok=True)
-    log_filename = (f"defense_{args.dataset}_{args.model}_"
-                    f"{args.attack}_{time.strftime('%Y%m%d_%H%M%S')}.log")
-    log_path = os.path.join(args.output_dir, log_filename)
+    # Resolve run directory
+    if args.run_dir:
+        run_dir = args.run_dir
+    else:
+        ts      = time.strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(args.output_dir, f"defense_{ts}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Init log file inside run_dir
+    log_filename = (f"defense_{args.dataset}_{args.model}_{args.attack}.log")
+    log_path = os.path.join(run_dir, log_filename)
     init_logger(log_path)
     set_attack_logger(_log_file)  # share handle with attacks.py
 
+    _log(f"Run directory: {run_dir}")
     _log(f"Device: {device}")
     _log(f"Args: {vars(args)}")
 
@@ -448,7 +463,7 @@ def run_evaluation(args):
                     prev_grad = None
 
                 img_save_dir = os.path.join(
-                    args.output_dir, "images",
+                    run_dir, "images",
                     f"{args.dataset}_{args.model}_{atk}")
                 metrics = evaluate_single(
                     model, image, label, device,
@@ -483,8 +498,7 @@ def run_evaluation(args):
             })
 
     # Save CSV
-    os.makedirs(args.output_dir, exist_ok=True)
-    csv_path = os.path.join(args.output_dir,
+    csv_path = os.path.join(run_dir,
                             f"defense_capability_{args.dataset}_{args.model}.csv")
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
@@ -518,7 +532,12 @@ if __name__ == "__main__":
     parser.add_argument("--tinyimagenet_dir", default=None,
                         help="Path to Tiny-ImageNet val directory "
                              "(e.g. /data/tiny-imagenet-200/val)")
-    parser.add_argument("--output_dir", default="./results")
+    parser.add_argument("--output_dir", default="./results",
+                        help="Base results dir (ignored if --run_dir is set)")
+    parser.add_argument("--run_dir",    default=None,
+                        help="Explicit output directory for this run "
+                             "(e.g. results/defense_20260412_221355). "
+                             "If not set, auto-created under output_dir.")
     parser.add_argument("--seed",       type=int, default=42)
     args = parser.parse_args()
 
