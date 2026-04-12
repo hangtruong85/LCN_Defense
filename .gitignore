@@ -1,0 +1,24 @@
+# Dataset
+data/
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Logs
+results
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+
+print_latex_tables.py
+run_all.sh
