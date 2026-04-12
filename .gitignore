@@ -21,4 +21,4 @@ Thumbs.db
 .vscode/
 
 print_latex_tables.py
-# run_all.sh
+checkpoints/

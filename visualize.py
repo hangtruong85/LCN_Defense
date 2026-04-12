@@ -153,12 +153,12 @@ def build_figure(args):
     out_path = os.path.join(
         args.output_dir,
         f"fig_defense_{args.attack}_{args.dataset}_{args.model}.pdf")
-    fig.savefig(out_path, bbox_inches="tight", dpi=150)
+    fig.savefig(out_path, bbox_inches="tight")
     print(f"Figure saved to: {out_path}")
 
-    # Also save PNG for quick preview
+    # Save PNG at same size as PDF (dpi=72 = screen resolution, no upscaling)
     fig.savefig(out_path.replace(".pdf", ".png"),
-                bbox_inches="tight", dpi=150)
+                bbox_inches="tight", dpi=72)
 
 
 if __name__ == "__main__":

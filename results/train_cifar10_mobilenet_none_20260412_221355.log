@@ -1,0 +1,11 @@
+[2026-04-12 22:13:55] Log file: ./results/train_cifar10_mobilenet_none_20260412_221355.log
+[2026-04-12 22:13:55] Device  : cuda
+[2026-04-12 22:13:55] Args    : {'dataset': 'cifar10', 'model': 'mobilenet', 'n_clients': 5, 'rounds': 100, 'local_epochs': 1, 'local_bs': 64, 'lr': 0.001, 'defense': 'none', 'alpha': 0.7, 'sigma': 0.001, 'ckpt_dir': './checkpoints', 'output_dir': './results', 'seed': 42}
+[2026-04-12 22:13:55] Loading dataset: cifar10  n_clients=5
+[2026-04-12 22:13:57] num_classes=10  train per client≈10000  test=10000
+[2026-04-12 22:13:57] Building model: mobilenet  num_classes=10
+[2026-04-12 22:13:57] Checkpoint (best) : ./checkpoints/cifar10_mobilenet.pth
+[2026-04-12 22:13:57] Checkpoint (last) : ./checkpoints/cifar10_mobilenet_last.pth
+[2026-04-12 22:14:37] Round   1/100  train_acc=7.60%  val_acc=10.00%  (40.1s)
+[2026-04-12 22:14:37]   ★ New best val_acc=10.00% — saved to ./checkpoints/cifar10_mobilenet.pth
+[2026-04-12 22:15:10] Round   2/100  train_acc=7.60%  val_acc=10.00%  (32.7s)
