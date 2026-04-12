@@ -1,6 +1,0 @@
-[2026-04-12 11:19:07] Log file: ./results/defense_tinyimagenet_resnet18_idlg_20260412_111907.log
-[2026-04-12 11:19:07] Device: cuda
-[2026-04-12 11:19:07] Args: {'dataset': 'tinyimagenet', 'model': 'resnet18', 'attack': 'idlg', 'n_samples': 2, 'checkpoint': './checkpoints/tinyimagenet_resnet18.pth', 'output_dir': './results', 'seed': 42}
-[2026-04-12 11:19:07] Loading LPIPS model (alex)...
-[2026-04-12 11:19:08] LPIPS ready.
-[2026-04-12 11:19:08] Loading dataset: tinyimagenet  (n_samples=2)
