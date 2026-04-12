@@ -50,10 +50,11 @@ echo "============================================================"
 echo " STEP 2: Visualization (PDF + PNG figures)"
 echo "============================================================"
 
-for DATASET_MODEL in "cifar10 mobilenet $CKPT_CIFAR10" \
-                     "tinyimagenet resnet18 $CKPT_TINY"; do
+#for DATASET_MODEL in "cifar10 mobilenet $CKPT_CIFAR10" "tinyimagenet resnet18 $CKPT_TINY"; do
+for DATASET_MODEL in  "tinyimagenet resnet18 $CKPT_TINY"; do
   read -r DATASET MODEL CKPT <<< "$DATASET_MODEL"
-  for ATTACK in ig idlg; do
+  #for ATTACK in ig idlg; do
+  for ATTACK in idlg; do
     echo ""
     echo ">>> Visualization: Dataset=$DATASET  Model=$MODEL  Attack=$ATTACK"
     python visualize.py \
