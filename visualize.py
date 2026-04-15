@@ -66,7 +66,8 @@ def build_figure(args):
 
     # Model
     num_classes = 10 if args.dataset == "cifar10" else 200
-    model = get_model(args.model, num_classes=num_classes).to(device)
+    img_size = 32 if args.dataset == "cifar10" else 64
+    model = get_model(args.model, num_classes=num_classes, img_size=img_size).to(device)
     if args.checkpoint and os.path.exists(args.checkpoint):
         model.load_state_dict(
             torch.load(args.checkpoint, map_location=device))
@@ -103,12 +104,12 @@ def build_figure(args):
         label = torch.tensor(label)
 
         # Obtain prev_grad for LCN by simulating round t-1
-        m_prev = get_model(args.model, num_classes=num_classes).to(device)
+        m_prev = get_model(args.model, num_classes=num_classes, img_size=img_size).to(device)
         m_prev.load_state_dict(model.state_dict())
         _, prev_grad = simulate_fl_round(m_prev, image, label, device)
 
         # True gradient at round t
-        m_cur = get_model(args.model, num_classes=num_classes).to(device)
+        m_cur = get_model(args.model, num_classes=num_classes, img_size=img_size).to(device)
         m_cur.load_state_dict(model.state_dict())
         _, true_grad = simulate_fl_round(m_cur, image, label, device)
 
@@ -130,7 +131,7 @@ def build_figure(args):
             elif defense == "lcn":
                 obs_grad = apply_lcn(true_grad, prev_grad, alpha=param)
 
-            m_atk = get_model(args.model, num_classes=num_classes).to(device)
+            m_atk = get_model(args.model, num_classes=num_classes, img_size=img_size).to(device)
             m_atk.load_state_dict(model.state_dict())
             m_atk.eval()
 
@@ -167,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset",    default="cifar10",
                         choices=["cifar10", "tinyimagenet"])
     parser.add_argument("--model",      default="mobilenet",
-                        choices=["mobilenet", "resnet18"])
+                        choices=["mobilenet", "resnet18", "lenet"])
     parser.add_argument("--attack",     default="ig",
                         choices=["ig", "idlg"])
     parser.add_argument("--n_show",     type=int, default=4,

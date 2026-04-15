@@ -242,9 +242,11 @@ def simulate_fl_round(model, image, label, device, prev_grad=None):
 # ─────────────────────────────────────────────
 def evaluate_single(model, image, label, device, defense, param,
                     attack_type, prev_grad, lpips_fn, img_idx,
-                    n_images, cond_label, save_dir=None, model_name="mobilenet"):
+                    n_images, cond_label, save_dir=None,
+                    model_name="mobilenet", img_size=32):
     model_copy = get_model(model_name,
-                           num_classes=_num_classes(model)).to(device)
+                           num_classes=_num_classes(model),
+                           img_size=img_size).to(device)
     model_copy.load_state_dict(model.state_dict())
     model_copy.eval()
 
@@ -252,7 +254,8 @@ def evaluate_single(model, image, label, device, defense, param,
     _log(f"      [{cond_label}] img {img_idx}/{n_images} — computing true gradient...")
     _, true_grad = simulate_fl_round(
         get_model(model_name,
-                  num_classes=_num_classes(model)).to(device),
+                  num_classes=_num_classes(model),
+                  img_size=img_size).to(device),
         image, label, device)
 
     # Apply defense
@@ -403,7 +406,9 @@ def run_evaluation(args):
 
     num_classes = 10 if args.dataset == "cifar10" else 200
     _log(f"Building model: {args.model}  num_classes={num_classes}")
-    model = get_model(args.model, num_classes=num_classes).to(device)
+    img_size = 32 if args.dataset == "cifar10" else 64
+    model = get_model(args.model, num_classes=num_classes,
+                      img_size=img_size).to(device)
 
     if args.checkpoint and os.path.exists(args.checkpoint):
         model.load_state_dict(torch.load(args.checkpoint, map_location=device))
@@ -455,7 +460,8 @@ def run_evaluation(args):
                         _log(f"      [lcn] img {idx+1} — simulating prev round (t-1)...")
                         _, pg = simulate_fl_round(
                             get_model(args.model,
-                                      num_classes=num_classes).to(device),
+                                      num_classes=num_classes,
+                                      img_size=img_size).to(device),
                             image, label, device)
                         prev_grad_store[idx] = pg
                     prev_grad = prev_grad_store[idx]
@@ -470,7 +476,7 @@ def run_evaluation(args):
                     defense, param, atk, prev_grad, lpips_fn,
                     img_idx=idx+1, n_images=n_images,
                     cond_label=cond_label, save_dir=img_save_dir,
-                    model_name=args.model)
+                    model_name=args.model, img_size=img_size)
 
                 psnr_list.append(metrics["psnr"])
                 ssim_list.append(metrics["ssim"])
@@ -523,7 +529,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset",    default="cifar10",
                         choices=["cifar10", "tinyimagenet"])
     parser.add_argument("--model",      default="mobilenet",
-                        choices=["mobilenet", "resnet18"])
+                        choices=["mobilenet", "resnet18", "lenet"])
     parser.add_argument("--attack",     default="ig",
                         choices=["ig", "idlg"])
     parser.add_argument("--n_samples",  type=int, default=10)
