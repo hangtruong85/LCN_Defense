@@ -1,12 +1,23 @@
 """
-Evaluations on Defense Capability
-===================================
-Evaluates LCN defense against:
-  - IG  (Inverting Gradients, optimization-based)
-  - iDLG (analytics-based)
+train_fl.py — Federated Learning Training with LCN Defense
+============================================================
+Trains a global model using FedAvg (and optionally LCN/DP defense)
+then saves the checkpoint for use in defense capability evaluation.
 
-Metrics: PSNR, SSIM, LPIPS
-Conditions: No Defense / DP / LCN
+Usage examples:
+  # Train baseline FedAvg (no defense) — recommended for evaluation
+  python train_fl.py --dataset cifar10   --model mobilenet  --defense none
+  python train_fl.py --dataset tinyimagenet --model resnet18 --defense none
+
+  # Train with LCN defense
+  python train_fl.py --dataset cifar10 --model mobilenet --defense lcn --alpha 0.7
+
+  # Train with DP defense
+  python train_fl.py --dataset cifar10 --model mobilenet --defense dp --sigma 1e-3
+
+Checkpoints saved to:
+  ./checkpoints/<dataset>_<model>_<defense>.pth   (best val accuracy)
+  ./checkpoints/<dataset>_<model>_<defense>_last.pth  (last round)
 """
 
 import os
@@ -19,29 +30,25 @@ import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
-import torchvision.utils as vutils
 from torch.utils.data import DataLoader, Subset
 
 from models import get_model
-from attacks import ig_attack, idlg_attack, set_attack_logger
-from metrics import compute_psnr, compute_ssim, compute_lpips
-from lcn import apply_lcn, apply_dp_noise
+from lcn import apply_lcn, apply_dp_noise, generate_betas
 
 
 # ─────────────────────────────────────────────
-# Logging helper
+# Logging
 # ─────────────────────────────────────────────
 _log_file = None
 
 def init_logger(log_path):
-    """Open log file and register it globally."""
     global _log_file
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    _log_file = open(log_path, "a", buffering=1)  # line-buffered
+    _log_file = open(log_path, "a", buffering=1)
     _log(f"Log file: {log_path}")
 
 def _log(msg):
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    ts   = time.strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line, flush=True)
     if _log_file is not None:
@@ -60,156 +67,7 @@ def set_seed(seed=42):
 
 
 # ─────────────────────────────────────────────
-# Tiny-ImageNet downloader
-# ─────────────────────────────────────────────
-def _download_tinyimagenet(data_root="./data"):
-    """
-    Download and extract Tiny-ImageNet-200 into data_root.
-    Also fixes the val/ directory structure so ImageFolder can read it.
-    Returns path to the val/ directory.
-    """
-    import urllib.request
-    import zipfile
-    import shutil
-
-    url      = "http://cs231n.stanford.edu/tiny-imagenet-200.zip"
-    zip_path = os.path.join(data_root, "tiny-imagenet-200.zip")
-    out_dir  = os.path.join(data_root, "tiny-imagenet-200")
-    val_dir  = os.path.join(out_dir, "val")
-
-    os.makedirs(data_root, exist_ok=True)
-
-    # ── Progress callback (defined once, used everywhere) ─────
-    def _progress(block_num, block_size, total_size):
-        downloaded = block_num * block_size
-        if total_size > 0:
-            pct = downloaded / total_size * 100
-            mb  = downloaded / 1024 / 1024
-            if block_num % 500 == 0:
-                _log(f"  {pct:.1f}%  ({mb:.1f} MB)")
-
-    # ── Download ──────────────────────────────────────────────
-    def _do_download():
-        _log(f"Downloading Tiny-ImageNet from {url} ...")
-        _log("(~240 MB, this may take a few minutes)")
-        urllib.request.urlretrieve(url, zip_path, reporthook=_progress)
-        _log("Download complete.")
-
-    if not os.path.exists(zip_path):
-        _do_download()
-    else:
-        _log(f"Zip already exists: {zip_path}")
-
-    # ── Validate zip, re-download if corrupt ──────────────────
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            bad = zf.testzip()
-            if bad is not None:
-                raise zipfile.BadZipFile(f"Bad file in zip: {bad}")
-    except zipfile.BadZipFile:
-        _log("Zip file is corrupt — deleting and re-downloading...")
-        os.remove(zip_path)
-        _do_download()
-
-    if not os.path.exists(out_dir):
-        _log(f"Extracting to {out_dir} ...")
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(data_root)
-        _log("Extraction complete.")
-    else:
-        _log(f"Already extracted: {out_dir}")
-
-    # ── Fix val/ structure ────────────────────────────────────
-    # Raw val/ has all images flat in val/images/ with a val_annotations.txt
-    # ImageFolder needs: val/<class_name>/<image>.JPEG
-    ann_file = os.path.join(val_dir, "val_annotations.txt")
-    img_dir  = os.path.join(val_dir, "images")
-
-    if os.path.exists(ann_file) and os.path.exists(img_dir):
-        _log("Reorganizing val/ directory for ImageFolder compatibility...")
-
-        # Parse annotation file: filename \t class_id \t ...
-        img_to_class = {}
-        with open(ann_file) as f:
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 2:
-                    img_to_class[parts[0]] = parts[1]
-
-        # Move each image into val/<class>/
-        moved = 0
-        for img_name, cls in img_to_class.items():
-            src = os.path.join(img_dir, img_name)
-            cls_dir = os.path.join(val_dir, cls)
-            os.makedirs(cls_dir, exist_ok=True)
-            dst = os.path.join(cls_dir, img_name)
-            if os.path.exists(src) and not os.path.exists(dst):
-                shutil.move(src, dst)
-                moved += 1
-
-        _log(f"Moved {moved} images into class subdirectories.")
-
-        # Remove now-empty images/ dir and annotation file
-        if os.path.exists(img_dir) and not os.listdir(img_dir):
-            os.rmdir(img_dir)
-
-    else:
-        _log("val/ already reorganized — skipping.")
-
-    return val_dir
-
-
-# ─────────────────────────────────────────────
-# Dataset loader
-# ─────────────────────────────────────────────
-def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
-    """Return a small subset of the test set for reconstruction evaluation."""
-    if name == "cifar10":
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465),
-                                  (0.2023, 0.1994, 0.2010)),
-        ])
-        dataset = torchvision.datasets.CIFAR10(
-            root="./data", train=False, download=True, transform=transform)
-    elif name == "tinyimagenet":
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406),
-                                  (0.229, 0.224, 0.225)),
-        ])
-        # Auto-detect Tiny-ImageNet val directory
-        candidates = (
-            [tinyimagenet_dir] if tinyimagenet_dir else []
-        ) + [
-            "./data/tiny-imagenet-200/val",
-            "./data/tiny-imagenet/val",
-            "../data/tiny-imagenet-200/val",
-            "/data/tiny-imagenet-200/val",
-            "/dataset/tiny-imagenet-200/val",
-            "/home/hangttt/data/tiny-imagenet-200/val",
-        ]
-        tiny_root = None
-        for c in candidates:
-            if os.path.isdir(c):
-                tiny_root = c
-                break
-        if tiny_root is None:
-            _log("Tiny-ImageNet not found locally — downloading...")
-            tiny_root = _download_tinyimagenet("./data")
-
-        _log(f"Tiny-ImageNet val dir: {tiny_root}")
-        dataset = torchvision.datasets.ImageFolder(
-            root=tiny_root, transform=transform)
-    else:
-        raise ValueError(f"Unknown dataset: {name}")
-
-    indices = random.sample(range(len(dataset)), n_samples)
-    return Subset(dataset, indices)
-
-
-# ─────────────────────────────────────────────
-# BatchNorm fix: set BN layers to eval while keeping others trainable
+# BatchNorm fix for batch_size=1
 # ─────────────────────────────────────────────
 def _set_bn_eval(model):
     for m in model.modules():
@@ -218,306 +76,381 @@ def _set_bn_eval(model):
 
 
 # ─────────────────────────────────────────────
-# Simulate one FL round and return (model, true_grad)
+# Dataset
 # ─────────────────────────────────────────────
-def simulate_fl_round(model, image, label, device, prev_grad=None):
+def get_datasets(name, n_clients, data_root="./data"):
+    """
+    Return (list_of_train_subsets, test_dataset).
+    Training data is split IID across n_clients.
+    """
+    if name == "cifar10":
+        mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+        train_tf = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        test_tf = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        train_full = torchvision.datasets.CIFAR10(
+            root=data_root, train=True,  download=True, transform=train_tf)
+        test_ds    = torchvision.datasets.CIFAR10(
+            root=data_root, train=False, download=True, transform=test_tf)
+        num_classes = 10
+
+    elif name == "tinyimagenet":
+        mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+        train_tf = transforms.Compose([
+            transforms.RandomCrop(64, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        test_tf = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        # Auto-detect or download Tiny-ImageNet
+        train_dir, val_dir = _get_tinyimagenet_dirs(data_root)
+        train_full = torchvision.datasets.ImageFolder(
+            root=train_dir, transform=train_tf)
+        test_ds    = torchvision.datasets.ImageFolder(
+            root=val_dir, transform=test_tf)
+        num_classes = 200
+
+    else:
+        raise ValueError(f"Unknown dataset: {name}")
+
+    # IID split across clients
+    n        = len(train_full)
+    per      = n // n_clients
+    indices  = list(range(n))
+    random.shuffle(indices)
+    client_datasets = [
+        Subset(train_full, indices[i * per: (i + 1) * per])
+        for i in range(n_clients)
+    ]
+
+    return client_datasets, test_ds, num_classes
+
+
+# ─────────────────────────────────────────────
+# Tiny-ImageNet helpers
+# ─────────────────────────────────────────────
+def _get_tinyimagenet_dirs(data_root):
+    import shutil, zipfile, urllib.request
+
+    out_dir   = os.path.join(data_root, "tiny-imagenet-200")
+    train_dir = os.path.join(out_dir, "train")
+    val_dir   = os.path.join(out_dir, "val")
+    zip_path  = os.path.join(data_root, "tiny-imagenet-200.zip")
+    url       = "http://cs231n.stanford.edu/tiny-imagenet-200.zip"
+
+    os.makedirs(data_root, exist_ok=True)
+
+    def _progress(block_num, block_size, total_size):
+        if total_size > 0 and block_num % 500 == 0:
+            mb  = block_num * block_size / 1024 / 1024
+            pct = block_num * block_size / total_size * 100
+            _log(f"  Downloading: {pct:.1f}%  ({mb:.1f} MB)")
+
+    def _do_download():
+        _log(f"Downloading Tiny-ImageNet (~240 MB)...")
+        urllib.request.urlretrieve(url, zip_path, reporthook=_progress)
+        _log("Download complete.")
+
+    # Download if needed
+    if not os.path.exists(zip_path):
+        _do_download()
+    else:
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                if zf.testzip() is not None:
+                    raise zipfile.BadZipFile
+        except zipfile.BadZipFile:
+            _log("Corrupt zip — re-downloading...")
+            os.remove(zip_path)
+            _do_download()
+
+    # Extract if needed
+    if not os.path.exists(out_dir):
+        _log("Extracting Tiny-ImageNet...")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(data_root)
+        _log("Extraction complete.")
+
+    # Fix val/ structure
+    ann_file = os.path.join(val_dir, "val_annotations.txt")
+    img_dir  = os.path.join(val_dir, "images")
+    if os.path.exists(ann_file) and os.path.exists(img_dir):
+        _log("Reorganizing val/ for ImageFolder...")
+        img_to_cls = {}
+        with open(ann_file) as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 2:
+                    img_to_cls[parts[0]] = parts[1]
+        moved = 0
+        for img_name, cls in img_to_cls.items():
+            src = os.path.join(img_dir, img_name)
+            dst_dir = os.path.join(val_dir, cls)
+            os.makedirs(dst_dir, exist_ok=True)
+            dst = os.path.join(dst_dir, img_name)
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.move(src, dst)
+                moved += 1
+        if moved:
+            _log(f"Moved {moved} val images.")
+        if os.path.exists(img_dir) and not os.listdir(img_dir):
+            os.rmdir(img_dir)
+
+    return train_dir, val_dir
+
+
+# ─────────────────────────────────────────────
+# One local training step (1 client, E epochs)
+# ─────────────────────────────────────────────
+def local_train(model, dataset, device, local_bs, local_epochs, lr):
+    """
+    Train model locally for local_epochs epochs.
+    Returns local update Delta_w = w_local - w_global.
+    """
     model.train()
     _set_bn_eval(model)
 
+    loader    = DataLoader(dataset, batch_size=local_bs,
+                           shuffle=True, drop_last=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    optimizer.zero_grad()
 
-    out  = model(image.unsqueeze(0).to(device))
-    loss = criterion(out, label.unsqueeze(0).to(device))
-    loss.backward()
+    w_init = {k: v.clone() for k, v in model.state_dict().items()}
 
-    true_grad = [p.grad.clone().detach() for p in model.parameters()]
-    optimizer.step()
-    return model, true_grad
+    for _ in range(local_epochs):
+        for images, labels in loader:
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(images), labels)
+            loss.backward()
+            optimizer.step()
+            _set_bn_eval(model)
+
+    # Compute delta = w_local - w_global
+    delta = {k: model.state_dict()[k].float() - w_init[k].float()
+             for k in w_init}
+    return delta
 
 
 # ─────────────────────────────────────────────
-# Evaluate one (image, label) under one defense condition
+# Apply defense to a list of deltas
 # ─────────────────────────────────────────────
-def evaluate_single(model, image, label, device, defense, param,
-                    attack_type, prev_grad, lpips_fn, img_idx,
-                    n_images, cond_label, save_dir=None,
-                    model_name="mobilenet", img_size=32):
-    model_copy = get_model(model_name,
-                           num_classes=_num_classes(model),
-                           img_size=img_size).to(device)
-    model_copy.load_state_dict(model.state_dict())
-    model_copy.eval()
+def apply_defense_to_deltas(deltas, w_cur, w_prev, betas,
+                            defense, alpha, sigma, device):
+    """
+    Áp dụng defense lên list of dicts {param_name: tensor}.
 
-    # True gradient
-    _log(f"      [{cond_label}] img {img_idx}/{n_images} — computing true gradient...")
-    _, true_grad = simulate_fl_round(
-        get_model(model_name,
-                  num_classes=_num_classes(model),
-                  img_size=img_size).to(device),
-        image, label, device)
+    LCN mới (theo paper):
+        n_k^(t) = beta_k * (1-alpha) * m * (w^(t) - w^(t-1))
+        w'_k^(t) = alpha * Dw_k^(t) + n_k^(t)
 
-    # Apply defense
-    _log(f"      [{cond_label}] img {img_idx}/{n_images} — applying defense: {defense} ...")
+    Args:
+        deltas  : list of dicts, mỗi dict là local update của 1 client
+        w_cur   : list of tensors, global model w^(t)
+                  (dạng list of param tensors)
+        w_prev  : list of tensors, global model w^(t-1)
+        betas   : list of floats, hệ số beta của từng client
+        defense : 'none' | 'dp' | 'lcn'
+        alpha   : float
+        sigma   : float (DP only)
+        device  : torch.device
+    Returns:
+        list of dicts, defended deltas
+    """
     if defense == "none":
-        observed_grad = true_grad
-    elif defense == "dp":
-        observed_grad = apply_dp_noise(true_grad, sigma=param, device=device)
-    elif defense == "lcn":
-        assert prev_grad is not None, "LCN requires prev_grad"
-        observed_grad = apply_lcn(true_grad, prev_grad, alpha=param)
-    else:
-        raise ValueError(f"Unknown defense: {defense}")
+        return deltas
 
-    # Attack
-    _log(f"      [{cond_label}] img {img_idx}/{n_images} — running {attack_type.upper()} attack...")
-    t0 = time.time()
-    if attack_type == "ig":
-        reconstructed = ig_attack(model_copy, observed_grad, image, device)
-    elif attack_type == "idlg":
-        reconstructed = idlg_attack(model_copy, observed_grad, image,
-                                     label, device)
-    else:
-        raise ValueError(f"Unknown attack: {attack_type}")
-    atk_elapsed = time.time() - t0
-    _log(f"      [{cond_label}] img {img_idx}/{n_images} — attack done in {atk_elapsed:.1f}s")
+    m = len(deltas)
+    defended = []
 
-    # Metrics
-    orig_np = _to_numpy(image)
-    rec_np  = _to_numpy(reconstructed)
-    psnr    = compute_psnr(orig_np, rec_np)
-    ssim    = compute_ssim(orig_np, rec_np)
-    lpips   = compute_lpips(image, reconstructed, lpips_fn, device)
+    for i, delta in enumerate(deltas):
+        keys   = list(delta.keys())
+        values = [delta[k] for k in keys]
 
-    _log(f"      [{cond_label}] img {img_idx}/{n_images} — "
-         f"PSNR={psnr:.2f}  SSIM={ssim:.4f}  LPIPS={lpips:.4f}")
+        if defense == "dp":
+            noisy = apply_dp_noise(values, sigma=sigma, device=device)
+            defended.append(dict(zip(keys, noisy)))
 
-    # Save images
-    if save_dir is not None:
-        _save_image_pair(image, reconstructed, save_dir,
-                         defense, param, img_idx, attack_type)
-        _log(f"      [{cond_label}] img {img_idx}/{n_images} — images saved.")
+        elif defense == "lcn":
+            if w_prev is not None:
+                perturbed = apply_lcn(
+                    true_grad=values,
+                    w_cur=w_cur,
+                    w_prev=w_prev,
+                    alpha=alpha,
+                    beta_k=betas[i],
+                    m=m
+                )
+            else:
+                # Round 1: w_prev chưa có → không thêm nhiễu
+                perturbed = values
+            defended.append(dict(zip(keys, perturbed)))
 
-    return {"psnr": psnr, "ssim": ssim, "lpips": lpips}
+    return defended
 
 
 # ─────────────────────────────────────────────
-# Helpers
+# Evaluation
 # ─────────────────────────────────────────────
-def _to_numpy(tensor):
-    t = tensor.detach().cpu().float()
-    t = (t - t.min()) / (t.max() - t.min() + 1e-8)
-    return t.permute(1, 2, 0).numpy()
-
-
-def _num_classes(model):
-    for m in reversed(list(model.modules())):
-        if isinstance(m, nn.Linear):
-            return m.out_features
-    return 10
-
-
-def _save_image_pair(orig_tensor, rec_tensor, save_dir,
-                     defense, param, img_idx, attack_type):
-    """
-    Save original and reconstructed images at native resolution (no resize).
-    Folder structure:
-        save_dir/
-            orig/        img_001.png  ...
-            <cond>/      img_001.png  ...
-            comparison/  img_001_<cond>.png  (side-by-side, no padding)
-    """
-    from PIL import Image as PILImage
-    import numpy as np
-
-    def _to_pil(t):
-        """CHW tensor → PIL Image at native resolution."""
-        t = t.detach().cpu().float()
-        t = (t - t.min()) / (t.max() - t.min() + 1e-8)
-        t = t.clamp(0, 1)
-        # CHW → HWC, scale to uint8
-        arr = (t.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-        return PILImage.fromarray(arr)
-
-    param_str = str(param).replace(".", "p") if param is not None else "none"
-    cond_str  = f"{defense}_{param_str}"
-
-    orig_dir  = os.path.join(save_dir, "orig")
-    rec_dir   = os.path.join(save_dir, cond_str)
-    cmp_dir   = os.path.join(save_dir, "comparison")
-    for d in [orig_dir, rec_dir, cmp_dir]:
-        os.makedirs(d, exist_ok=True)
-
-    fname     = f"img_{img_idx:03d}_{attack_type}.png"
-    cmp_fname = f"img_{img_idx:03d}_{cond_str}_{attack_type}.png"
-
-    orig_pil = _to_pil(orig_tensor)
-    rec_pil  = _to_pil(rec_tensor)
-
-    # Save individual images at exact native resolution
-    orig_pil.save(os.path.join(orig_dir, fname))
-    rec_pil.save(os.path.join(rec_dir,  fname))
-
-    # Side-by-side comparison: concat horizontally, NO padding, NO resize
-    W, H = orig_pil.size
-    cmp  = PILImage.new("RGB", (W * 2, H))
-    cmp.paste(orig_pil, (0,  0))
-    cmp.paste(rec_pil,  (W,  0))
-    cmp.save(os.path.join(cmp_dir, cmp_fname))
+@torch.no_grad()
+def evaluate(model, test_ds, device, batch_size=128):
+    model.eval()
+    loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    correct = total = 0
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+        preds = model(images).argmax(dim=1)
+        correct += (preds == labels).sum().item()
+        total   += labels.size(0)
+    return correct / total * 100.0
 
 
 # ─────────────────────────────────────────────
-# Main evaluation loop
+# Main training loop
 # ─────────────────────────────────────────────
-def run_evaluation(args):
+def train(args):
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Resolve run directory
-    if args.run_dir:
-        run_dir = args.run_dir
-    else:
-        ts      = time.strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join(args.output_dir, f"defense_{ts}")
-    os.makedirs(run_dir, exist_ok=True)
+    # Logger
+    os.makedirs(args.output_dir, exist_ok=True)
+    log_name = (f"train_{args.dataset}_{args.model}_"
+                f"{args.defense}_{time.strftime('%Y%m%d_%H%M%S')}.log")
+    init_logger(os.path.join(args.output_dir, log_name))
 
-    # Init log file inside run_dir
-    log_filename = (f"defense_{args.dataset}_{args.model}_{args.attack}.log")
-    log_path = os.path.join(run_dir, log_filename)
-    init_logger(log_path)
-    set_attack_logger(_log_file)  # share handle with attacks.py
+    _log(f"Device  : {device}")
+    _log(f"Args    : {vars(args)}")
 
-    _log(f"Run directory: {run_dir}")
-    _log(f"Device: {device}")
-    _log(f"Args: {vars(args)}")
+    # Data
+    _log(f"Loading dataset: {args.dataset}  n_clients={args.n_clients}")
+    client_datasets, test_ds, num_classes = get_datasets(
+        args.dataset, args.n_clients, data_root="./data")
+    _log(f"num_classes={num_classes}  "
+         f"train per client≈{len(client_datasets[0])}  "
+         f"test={len(test_ds)}")
 
-    _log("Loading LPIPS model (alex)...")
-    import lpips as lpips_lib
-    lpips_fn = lpips_lib.LPIPS(net="alex").to(device)
-    _log("LPIPS ready.")
-
-    _log(f"Loading dataset: {args.dataset}  (n_samples={args.n_samples})")
-    tiny_dir = getattr(args, "tinyimagenet_dir", None)
-    dataset = get_dataset(args.dataset, n_samples=args.n_samples,
-                          tinyimagenet_dir=tiny_dir)
-    loader  = DataLoader(dataset, batch_size=1, shuffle=False)
-    _log(f"Dataset ready: {len(dataset)} images selected.")
-
-    num_classes = 10 if args.dataset == "cifar10" else 200
+    # Model
     _log(f"Building model: {args.model}  num_classes={num_classes}")
-    img_size = 32 if args.dataset == "cifar10" else 64
-    model = get_model(args.model, num_classes=num_classes,
-                      img_size=img_size).to(device)
+    global_model = get_model(args.model, num_classes=num_classes).to(device)
 
-    if args.checkpoint and os.path.exists(args.checkpoint):
-        model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-        _log(f"Loaded checkpoint: {args.checkpoint}")
-    else:
-        _log("No checkpoint found — using random weights (demo mode).")
+    # Checkpoint paths
+    ckpt_dir  = args.ckpt_dir
+    os.makedirs(ckpt_dir, exist_ok=True)
+    tag       = f"{args.dataset}_{args.model}"   # used by evaluate_defense.py
+    best_path = os.path.join(ckpt_dir, f"{tag}.pth")
+    last_path = os.path.join(ckpt_dir, f"{tag}_last.pth")
 
-    conditions = [
-        ("none",  None),
-        ("dp",    1e-3),
-        ("dp",    1e-2),
-        ("lcn",   1.1),
-        ("lcn",   0.9),
-        ("lcn",   0.7),
-        ("lcn",   0.5),
-    ]
+    _log(f"Checkpoint (best) : {best_path}")
+    _log(f"Checkpoint (last) : {last_path}")
 
-    n_conditions = len(conditions)
-    n_images     = args.n_samples
-    results      = []
-    total_start  = time.time()
+    # CSV log
+    csv_path = os.path.join(args.output_dir,
+                            f"train_{args.dataset}_{args.model}_{args.defense}.csv")
+    csv_f    = open(csv_path, "w", newline="")
+    csv_w    = csv.writer(csv_f)
+    csv_w.writerow(["round", "train_acc", "val_acc"])
 
-    _log(f"\nTotal plan: 1 attack × {n_conditions} conditions × {n_images} images "
-         f"= {n_conditions * n_images} jobs")
+    best_val    = 0.0
+    w_global_prev = None   # w^(t-1), dùng cho LCN
+    t_total     = time.time()
 
-    for atk in [args.attack]:
-        _log(f"\n{'='*64}")
-        _log(f"ATTACK: {atk.upper()}")
-        _log(f"{'='*64}")
+    # Sinh betas cho LCN — do trusted third party phân phối 1 lần
+    betas = generate_betas(args.n_clients, seed=args.seed)
+    _log(f"LCN betas (trusted third party): {[f'{b:.4f}' for b in betas]}")
 
-        for cond_idx, (defense, param) in enumerate(conditions):
-            label_str = (f"sigma={param}" if defense == "dp"  else
-                         f"alpha={param}" if defense == "lcn" else "no-defense")
-            cond_label = f"{defense}/{label_str}"
+    for rnd in range(1, args.rounds + 1):
+        t_rnd = time.time()
 
-            _log(f"\n  ── Condition {cond_idx+1}/{n_conditions}: "
-                 f"{cond_label} ──")
-            cond_start = time.time()
+        # Lưu w^(t) trước khi update (dùng cho LCN noise)
+        w_global_cur = [p.detach().clone()
+                        for p in global_model.parameters()]
 
-            psnr_list, ssim_list, lpips_list = [], [], []
-            prev_grad_store = {}
+        # ── Local training ────────────────────────────────────
+        local_deltas = []
+        for k in range(args.n_clients):
+            local_model = get_model(
+                args.model, num_classes=num_classes).to(device)
+            local_model.load_state_dict(global_model.state_dict())
 
-            for idx, (image, label) in enumerate(loader):
-                image = image.squeeze(0)
-                label = label.squeeze(0)
+            delta = local_train(
+                local_model,
+                client_datasets[k],
+                device,
+                local_bs=args.local_bs,
+                local_epochs=args.local_epochs,
+                lr=args.lr)
+            local_deltas.append(delta)
 
-                if defense == "lcn":
-                    if idx not in prev_grad_store:
-                        _log(f"      [lcn] img {idx+1} — simulating prev round (t-1)...")
-                        _, pg = simulate_fl_round(
-                            get_model(args.model,
-                                      num_classes=num_classes,
-                                      img_size=img_size).to(device),
-                            image, label, device)
-                        prev_grad_store[idx] = pg
-                    prev_grad = prev_grad_store[idx]
-                else:
-                    prev_grad = None
+        # ── Apply defense ─────────────────────────────────────
+        defended_deltas = apply_defense_to_deltas(
+            local_deltas,
+            w_cur=w_global_cur,
+            w_prev=w_global_prev,
+            betas=betas,
+            defense=args.defense,
+            alpha=args.alpha,
+            sigma=args.sigma,
+            device=device)
 
-                img_save_dir = os.path.join(
-                    run_dir, "images",
-                    f"{args.dataset}_{args.model}_{atk}")
-                metrics = evaluate_single(
-                    model, image, label, device,
-                    defense, param, atk, prev_grad, lpips_fn,
-                    img_idx=idx+1, n_images=n_images,
-                    cond_label=cond_label, save_dir=img_save_dir,
-                    model_name=args.model, img_size=img_size)
+        # Cập nhật w_prev cho round tiếp theo
+        w_global_prev = w_global_cur
 
-                psnr_list.append(metrics["psnr"])
-                ssim_list.append(metrics["ssim"])
-                lpips_list.append(metrics["lpips"])
+        # ── FedAvg aggregation ────────────────────────────────
+        global_sd = global_model.state_dict()
+        for k in global_sd:
+            if global_sd[k].dtype.is_floating_point:
+                avg_delta = torch.stack(
+                    [defended_deltas[i][k].to(device).float()
+                     for i in range(args.n_clients)]
+                ).mean(dim=0)
+                global_sd[k] = global_sd[k].float() + avg_delta
+        global_model.load_state_dict(global_sd)
 
-            cond_elapsed = time.time() - cond_start
-            _log(f"  Condition {cond_idx+1}/{n_conditions} COMPLETE "
-                 f"({cond_elapsed:.1f}s)  |  "
-                 f"mean PSNR={np.mean(psnr_list):.2f}  "
-                 f"mean SSIM={np.mean(ssim_list):.4f}  "
-                 f"mean LPIPS={np.mean(lpips_list):.4f}")
+        # ── Evaluate ──────────────────────────────────────────
+        val_acc   = evaluate(global_model, test_ds,   device)
+        train_acc = evaluate(global_model,
+                             Subset(client_datasets[0],
+                                    range(min(500, len(client_datasets[0])))),
+                             device)
 
-            results.append({
-                "attack":     atk,
-                "defense":    defense,
-                "param":      str(param),
-                "dataset":    args.dataset,
-                "model":      args.model,
-                "PSNR_mean":  np.mean(psnr_list),
-                "PSNR_std":   np.std(psnr_list),
-                "SSIM_mean":  np.mean(ssim_list),
-                "SSIM_std":   np.std(ssim_list),
-                "LPIPS_mean": np.mean(lpips_list),
-                "LPIPS_std":  np.std(lpips_list),
-            })
+        elapsed = time.time() - t_rnd
+        _log(f"Round {rnd:3d}/{args.rounds}  "
+             f"train_acc={train_acc:.2f}%  val_acc={val_acc:.2f}%  "
+             f"({elapsed:.1f}s)")
+        csv_w.writerow([rnd, f"{train_acc:.4f}", f"{val_acc:.4f}"])
+        csv_f.flush()
 
-    # Save CSV
-    csv_path = os.path.join(run_dir,
-                            f"defense_capability_{args.dataset}_{args.model}.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=results[0].keys())
-        writer.writeheader()
-        writer.writerows(results)
+        # ── Save best checkpoint ──────────────────────────────
+        if val_acc > best_val:
+            best_val = val_acc
+            torch.save(global_model.state_dict(), best_path)
+            _log(f"  ★ New best val_acc={best_val:.2f}% — saved to {best_path}")
 
-    total_elapsed = time.time() - total_start
-    _log(f"\nAll done in {total_elapsed/60:.1f} min. Results saved to: {csv_path}")
+    # Save last checkpoint
+    torch.save(global_model.state_dict(), last_path)
+    _log(f"Last checkpoint saved to: {last_path}")
 
-    if _log_file is not None:
+    total_min = (time.time() - t_total) / 60
+    _log(f"\nTraining complete in {total_min:.1f} min.  "
+         f"Best val_acc={best_val:.2f}%")
+    _log(f"Use checkpoint: {best_path}")
+
+    csv_f.close()
+    if _log_file:
         _log_file.close()
 
-    return results
+    return best_path
 
 
 # ─────────────────────────────────────────────
@@ -525,26 +458,37 @@ def run_evaluation(args):
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Defense Capability Evaluation for LCN")
-    parser.add_argument("--dataset",    default="cifar10",
-                        choices=["cifar10", "tinyimagenet"])
-    parser.add_argument("--model",      default="mobilenet",
-                        choices=["mobilenet", "resnet18", "lenet"])
-    parser.add_argument("--attack",     default="ig",
-                        choices=["ig", "idlg"])
-    parser.add_argument("--n_samples",  type=int, default=10)
-    parser.add_argument("--checkpoint", default=None,
-                        help="Path to pretrained model .pth file")
-    parser.add_argument("--tinyimagenet_dir", default=None,
-                        help="Path to Tiny-ImageNet val directory "
-                             "(e.g. /data/tiny-imagenet-200/val)")
-    parser.add_argument("--output_dir", default="./results",
-                        help="Base results dir (ignored if --run_dir is set)")
-    parser.add_argument("--run_dir",    default=None,
-                        help="Explicit output directory for this run "
-                             "(e.g. results/defense_20260412_221355). "
-                             "If not set, auto-created under output_dir.")
-    parser.add_argument("--seed",       type=int, default=42)
-    args = parser.parse_args()
+        description="FL Training — generates checkpoint for defense evaluation")
 
-    run_evaluation(args)
+    # Dataset / model
+    parser.add_argument("--dataset",       default="cifar10",
+                        choices=["cifar10", "tinyimagenet"])
+    parser.add_argument("--model",         default="mobilenet",
+                        choices=["mobilenet", "resnet18"])
+
+    # FL hyperparameters (match Section V-A setup)
+    parser.add_argument("--n_clients",     type=int,   default=5)
+    parser.add_argument("--rounds",        type=int,   default=100)
+    parser.add_argument("--local_epochs",  type=int,   default=1)
+    parser.add_argument("--local_bs",      type=int,   default=64)
+    parser.add_argument("--lr",            type=float, default=1e-3)
+
+    # Defense during training
+    parser.add_argument("--defense",       default="none",
+                        choices=["none", "dp", "lcn"],
+                        help="Defense applied during training "
+                             "(use 'none' for baseline checkpoint)")
+    parser.add_argument("--alpha",         type=float, default=0.7,
+                        help="LCN mixing coefficient (used if defense=lcn)")
+    parser.add_argument("--sigma",         type=float, default=1e-3,
+                        help="DP noise std (used if defense=dp)")
+
+    # Output
+    parser.add_argument("--ckpt_dir",      default="./checkpoints",
+                        help="Directory to save checkpoints")
+    parser.add_argument("--output_dir",    default="./results",
+                        help="Directory for logs and CSV")
+    parser.add_argument("--seed",          type=int,   default=42)
+
+    args = parser.parse_args()
+    train(args)
