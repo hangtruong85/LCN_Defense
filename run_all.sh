@@ -2,7 +2,7 @@
 # run_all.sh — Defense capability evaluation
 #
 # Models   : lenet (paper gốc iDLG), mobilenet, resnet18
-# Attacks  : idlg (L-BFGS 300 iter, lr=1.0)
+# Attacks  : idlg (L-BFGS 500 iter, lr=0.1  ← điều chỉnh)
 #            ig   (Adam 24000 iter, lr=0.1, 8 restarts, cosine+TV)
 #
 # Usage:
@@ -20,13 +20,15 @@ done
 N_SAMPLES=10
 IG_ITER=24000        # IG paper gốc: max_iterations=24000
 IG_RESTARTS=8        # IG paper gốc: restarts=8
-IDLG_ITER=300        # iDLG paper gốc: Iteration=300
+IDLG_ITER=500        # tăng từ 300 → 500
+IDLG_LR=0.1          # giảm từ 1.0 → 0.1
 
 if [ $QUICK -eq 1 ]; then
   N_SAMPLES=3
   IG_ITER=1000
   IG_RESTARTS=1
-  IDLG_ITER=300      # iDLG giữ nguyên 300 (nhanh sẵn)
+  IDLG_ITER=300
+  IDLG_LR=0.1
   echo ">>> QUICK MODE: n_samples=$N_SAMPLES  ig_iter=$IG_ITER  ig_restarts=$IG_RESTARTS"
 fi
 
@@ -40,7 +42,7 @@ echo "============================================================"
 echo " Defense Capability Evaluation"
 echo " Run directory : $RUN_DIR"
 echo " IG            : Adam lr=0.1, iter=$IG_ITER, restarts=$IG_RESTARTS"
-echo " iDLG          : L-BFGS lr=1.0, iter=$IDLG_ITER"
+echo " iDLG          : L-BFGS lr=$IDLG_LR, iter=$IDLG_ITER"
 echo "============================================================"
 
 cat > "$RUN_DIR/run_config.txt" << CONF
@@ -49,6 +51,7 @@ n_samples    : $N_SAMPLES
 ig_iter      : $IG_ITER
 ig_restarts  : $IG_RESTARTS
 idlg_iter    : $IDLG_ITER
+idlg_lr      : $IDLG_LR
 quick_mode   : $QUICK
 CONF
 
@@ -64,6 +67,7 @@ echo "============================================================"
 # Dataset-model-checkpoint combinations
 # Format: "dataset model checkpoint"
 CONFIGS=(
+  "tinyimagenet lenet     none"
   "cifar10 lenet     none"
   #"cifar10 mobilenet $CKPT_CIFAR10"
   #"cifar10 resnet18  none"
@@ -82,7 +86,7 @@ for CFG in "${CONFIGS[@]}"; do
     CKPT_ARG="--checkpoint $CKPT"
   fi
 
-  for ATTACK in idlg ig; do
+  for ATTACK in idlg; do
     echo ""
     echo ">>> Dataset=$DATASET  Model=$MODEL  Attack=$ATTACK"
     python evaluate_defense.py \
@@ -90,6 +94,8 @@ for CFG in "${CONFIGS[@]}"; do
       --model      "$MODEL" \
       --attack     "$ATTACK" \
       --n_samples  "$N_SAMPLES" \
+      --idlg_iter  "$IDLG_ITER" \
+      --idlg_lr    "$IDLG_LR" \
       $CKPT_ARG \
       --run_dir    "$RUN_DIR" \
       --seed       42
@@ -110,7 +116,7 @@ for CFG in "${CONFIGS[@]}"; do
     CKPT_ARG="--checkpoint $CKPT"
   fi
 
-  for ATTACK in idlg ig; do
+  for ATTACK in idlg; do
     echo ""
     echo ">>> Visualization: Dataset=$DATASET  Model=$MODEL  Attack=$ATTACK"
     python visualize.py \

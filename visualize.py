@@ -16,7 +16,7 @@ import random
 
 from models import get_model
 from attacks import ig_attack, idlg_attack
-from lcn import apply_lcn, apply_dp_noise
+from lcn import apply_lcn, apply_dp_noise, generate_betas
 from evaluate_defense import simulate_fl_round, _to_numpy, set_seed
 
 
@@ -39,8 +39,15 @@ def unnormalize(tensor, mean, std):
 # Build visualization figure
 # ─────────────────────────────────────────────
 def build_figure(args):
-    set_seed(args.seed)
+    set_seed(args.seed)   # seed cho gradient/model reproducibility
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Seed riêng cho việc chọn ảnh — None = random mỗi lần
+    import time as _time
+    vis_seed = args.vis_seed if args.vis_seed is not None                else int(_time.time()) % 100000
+    random.seed(vis_seed)
+    print(f"[visualize] vis_seed={vis_seed}  "
+          f"(dùng --vis_seed {vis_seed} để reproduce)")
 
     # Dataset
     if args.dataset == "cifar10":
@@ -106,12 +113,12 @@ def build_figure(args):
         # Obtain prev_grad for LCN by simulating round t-1
         m_prev = get_model(args.model, num_classes=num_classes, img_size=img_size).to(device)
         m_prev.load_state_dict(model.state_dict())
-        _, prev_grad = simulate_fl_round(m_prev, image, label, device)
+        _, prev_grad, w_prev, _ = simulate_fl_round(m_prev, image, label, device)
 
         # True gradient at round t
         m_cur = get_model(args.model, num_classes=num_classes, img_size=img_size).to(device)
         m_cur.load_state_dict(model.state_dict())
-        _, true_grad = simulate_fl_round(m_cur, image, label, device)
+        _, true_grad, w_cur, _ = simulate_fl_round(m_cur, image, label, device)
 
         # Plot original
         ax = fig.add_subplot(gs[row, 0])
@@ -121,6 +128,11 @@ def build_figure(args):
         if row == 0:
             ax.set_title("Original", fontsize=8, fontweight="bold")
 
+        # Sinh beta cho LCN (trusted third party, 1 lần per ảnh)
+        betas  = generate_betas(num_classes if args.model == "lenet" else 5, seed=42)
+        beta_k = betas[0]
+        m_lcn  = 5  # số clients
+
         # Plot each defense condition
         for col, (cond_label, defense, param) in enumerate(conditions):
             if defense == "none":
@@ -129,14 +141,21 @@ def build_figure(args):
                 obs_grad = apply_dp_noise(true_grad, sigma=param,
                                           device=device)
             elif defense == "lcn":
-                obs_grad = apply_lcn(true_grad, prev_grad, alpha=param)
+                obs_grad = apply_lcn(
+                    true_grad=true_grad,
+                    w_cur=w_cur,
+                    w_prev=w_prev,
+                    alpha=param,
+                    beta_k=beta_k,
+                    m=m_lcn
+                )
 
             m_atk = get_model(args.model, num_classes=num_classes, img_size=img_size).to(device)
             m_atk.load_state_dict(model.state_dict())
             m_atk.eval()
 
             if args.attack == "ig":
-                rec = ig_attack(m_atk, obs_grad, image, device,
+                rec = ig_attack(m_atk, obs_grad, image, device, original_label=label,
                                 n_iter=args.ig_iter)
             else:
                 rec = idlg_attack(m_atk, obs_grad, image, label, device)
@@ -177,7 +196,11 @@ if __name__ == "__main__":
                         help="IG iterations (lower for quick preview)")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--output_dir", default="./results/figures")
-    parser.add_argument("--seed",       type=int, default=42)
+    parser.add_argument("--seed",     type=int, default=42,
+                        help="Seed cho evaluate (reproduce gradient)")
+    parser.add_argument("--vis_seed", type=int, default=None,
+                        help="Seed cho chọn ảnh visualize "
+                             "(None = random mỗi lần, khác nhau giữa các run)")
     args = parser.parse_args()
 
     build_figure(args)
