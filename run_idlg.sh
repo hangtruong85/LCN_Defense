@@ -60,7 +60,7 @@ CKPT_CIFAR10="./checkpoints/cifar10_mobilenet.pth"
 CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 
 CONFIGS=(
-  "cifar10      lenet     none"
+  #"cifar10      lenet     none"
   "tinyimagenet      lenet     none"
   #"cifar10      mobilenet $CKPT_CIFAR10"
   #"cifar10      resnet18  none"
