@@ -54,10 +54,10 @@ CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 
 CONFIGS=(
   #"cifar10      lenet     none"
-  #"cifar10      mobilenet $CKPT_CIFAR10"
+  "cifar10      mobilenet $CKPT_CIFAR10"
   #"cifar10      resnet18  none"
   #"tinyimagenet mobilenet none"
-  "tinyimagenet resnet18  $CKPT_TINY"
+  #"tinyimagenet resnet18  $CKPT_TINY"
 )
 
 # ── STEP 1: Quantitative evaluation ───────────────────────────
@@ -74,7 +74,7 @@ for CFG in "${CONFIGS[@]}"; do
   fi
   echo ""
   echo ">>> Dataset=$DATASET  Model=$MODEL  Attack=ig"
-  python evaluate_defense.py \
+  python evaluate_defense_ig.py \
     --dataset   "$DATASET" \
     --model     "$MODEL" \
     --attack    ig \

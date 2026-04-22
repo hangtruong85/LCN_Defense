@@ -15,9 +15,9 @@
 set -e
 
 QUICK=0
-IDLG_LR=0.01
+IDLG_LR=0.1
 IDLG_ITER=500
-N_SAMPLES=1
+N_SAMPLES=10
 
 # ── Parse arguments ────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -59,13 +59,24 @@ CONF
 CKPT_CIFAR10="./checkpoints/cifar10_mobilenet.pth"
 CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 
+# LeNet (iDLG paper gốc) — không cần checkpoint, dùng random weights
+CONFIGS_LENET=(
+  "mnist     lenet  none"
+  "cifar10   lenet  none"
+  "cifar100  lenet  none"
+  "lfw       lenet  none"
+)
+
+# MobileNet / ResNet18 — cần checkpoint đã train
+CONFIGS_PRETRAINED=(
+  "cifar10      mobilenet $CKPT_CIFAR10"
+  "tinyimagenet resnet18  $CKPT_TINY"
+)
+
+# Gộp tất cả: LeNet trước, sau đó pretrained
 CONFIGS=(
-  #"cifar10      lenet     none"
-  "tinyimagenet      lenet     none"
-  #"cifar10      mobilenet $CKPT_CIFAR10"
-  #"cifar10      resnet18  none"
-  #"tinyimagenet mobilenet none"
-  #"tinyimagenet resnet18  $CKPT_TINY"
+  "${CONFIGS_LENET[@]}"
+  "${CONFIGS_PRETRAINED[@]}"
 )
 
 # ── STEP 1: Quantitative evaluation ───────────────────────────
@@ -82,7 +93,7 @@ for CFG in "${CONFIGS[@]}"; do
   fi
   echo ""
   echo ">>> Dataset=$DATASET  Model=$MODEL  Attack=idlg  lr=$IDLG_LR  iter=$IDLG_ITER"
-  python evaluate_defense.py \
+  python evaluate_defense_idlg.py \
     --dataset    "$DATASET" \
     --model      "$MODEL" \
     --attack     idlg \
@@ -102,7 +113,7 @@ echo "============================================================"
 
 python make_figures.py \
   --run_dir "$RUN_DIR" \
-  --n_show  4
+  --n_show  5
 
 # ── STEP 3: LaTeX tables ───────────────────────────────────────
 echo ""

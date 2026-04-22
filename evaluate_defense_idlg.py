@@ -36,7 +36,7 @@ from attacks_common import set_attack_logger, set_loss_dir
 from metrics import compute_psnr, compute_ssim, compute_lpips
 from lcn import apply_lcn, apply_dp_noise, generate_betas, compute_agg_prev
 
-# Normalization stats cho từng dataset
+# Config cho từng dataset (đúng theo iDLG paper gốc)
 DATASET_STATS = {
     "cifar10": {
         "mean": (0.4914, 0.4822, 0.4465),
@@ -46,6 +46,15 @@ DATASET_STATS = {
         "mean": (0.485, 0.456, 0.406),
         "std":  (0.229, 0.224, 0.225),
     },
+}
+
+# Metadata: num_classes, img_size, channel — dùng để build LeNet đúng
+DATASET_META = {
+    "mnist":      {"num_classes": 10,   "img_size": 28, "channel": 1},
+    "cifar10":    {"num_classes": 10,   "img_size": 32, "channel": 3},
+    "cifar100":   {"num_classes": 100,  "img_size": 32, "channel": 3},
+    "lfw":        {"num_classes": 5749, "img_size": 32, "channel": 3},
+    "tinyimagenet":{"num_classes": 200, "img_size": 64, "channel": 3},
 }
 
 
@@ -197,8 +206,18 @@ def _download_tinyimagenet(data_root="./data"):
 # Dataset loader
 # ─────────────────────────────────────────────
 def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
-    """Return a small subset of the test set for reconstruction evaluation."""
-    if name == "cifar10":
+    """Return a small subset of the test/val set for reconstruction evaluation."""
+
+    if name == "mnist":
+        # MNIST: 28x28 grayscale, 10 classes — đúng theo iDLG paper gốc
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ])
+        dataset = torchvision.datasets.MNIST(
+            root="./data", train=False, download=True, transform=transform)
+
+    elif name == "cifar10":
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465),
@@ -206,6 +225,33 @@ def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
         ])
         dataset = torchvision.datasets.CIFAR10(
             root="./data", train=False, download=True, transform=transform)
+
+    elif name == "cifar100":
+        # CIFAR-100: 32x32 RGB, 100 classes
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                  (0.2675, 0.2565, 0.2761)),
+        ])
+        dataset = torchvision.datasets.CIFAR100(
+            root="./data", train=False, download=True, transform=transform)
+
+    elif name == "lfw":
+        # LFW: 32x32 RGB, 5749 classes — đúng theo iDLG paper gốc
+        transform = transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+        dataset = torchvision.datasets.LFWPeople(
+            root="./data", split="test", download=True, transform=transform)
+        # LFWPeople có thể ít ảnh trong test split — fallback sang train
+        if len(dataset) < n_samples:
+            _log(f"LFW test split chỉ có {len(dataset)} ảnh, "
+                 f"dùng train split thay thế")
+            dataset = torchvision.datasets.LFWPeople(
+                root="./data", split="train", download=True, transform=transform)
+
     elif name == "tinyimagenet":
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -293,7 +339,8 @@ def evaluate_single(model, image, label, device, defense, param,
                     attack_type, lcn_state, lpips_fn, img_idx,
                     n_images, cond_label, save_dir=None,
                     model_name="mobilenet", img_size=32, n_clients=5,
-                    idlg_lr=1.0, idlg_iter=300, _dataset="cifar10"):
+                    idlg_lr=1.0, idlg_iter=300, _dataset="cifar10",
+                    channel=3):
     """
     lcn_state : dict với keys 'w_cur', 'w_prev', 'beta_k', 'm'
                 dùng cho LCN defense; None cho các defense khác.
@@ -307,7 +354,7 @@ def evaluate_single(model, image, label, device, defense, param,
 
     # m_grad: tính gradient — cùng weights với model gốc
     m_grad = get_model(model_name, num_classes=num_classes,
-                       img_size=img_size).to(device)
+                       img_size=img_size, channel=channel).to(device)
     m_grad.load_state_dict(model.state_dict())
 
     # True gradient — dùng m_grad đã load checkpoint
@@ -336,7 +383,7 @@ def evaluate_single(model, image, label, device, defense, param,
 
     # m_atk: dùng để attack — cùng weights, để eval mode
     model_copy = get_model(model_name, num_classes=num_classes,
-                           img_size=img_size).to(device)
+                           img_size=img_size, channel=channel).to(device)
     model_copy.load_state_dict(model.state_dict())
     model_copy.eval()
 
@@ -482,16 +529,19 @@ def run_evaluation(args):
 
     _log(f"Loading dataset: {args.dataset}  (n_samples={args.n_samples})")
     tiny_dir = getattr(args, "tinyimagenet_dir", None)
-    dataset = get_dataset(args.dataset, n_samples=args.n_samples,
-                          tinyimagenet_dir=tiny_dir)
+    dataset  = get_dataset(args.dataset, n_samples=args.n_samples,
+                           tinyimagenet_dir=tiny_dir)
     loader  = DataLoader(dataset, batch_size=1, shuffle=False)
     _log(f"Dataset ready: {len(dataset)} images selected.")
 
-    num_classes = 10 if args.dataset == "cifar10" else 200
-    _log(f"Building model: {args.model}  num_classes={num_classes}")
-    img_size = 32 if args.dataset == "cifar10" else 64
+    meta        = DATASET_META[args.dataset]
+    num_classes = meta["num_classes"]
+    img_size    = meta["img_size"]
+    _log(f"Building model: {args.model}  "
+         f"num_classes={num_classes}  img_size={img_size}")
+    channel = meta["channel"]
     model = get_model(args.model, num_classes=num_classes,
-                      img_size=img_size).to(device)
+                      img_size=img_size, channel=channel).to(device)
 
     if args.checkpoint and os.path.exists(args.checkpoint):
         model.load_state_dict(torch.load(args.checkpoint, map_location=device))
@@ -577,7 +627,8 @@ def run_evaluation(args):
                     n_clients=n_clients,
                     idlg_lr=args.idlg_lr,
                     idlg_iter=args.idlg_iter,
-                    _dataset=args.dataset)
+                    _dataset=args.dataset,
+                    channel=channel)
 
                 # Cập nhật w_prev cho ảnh tiếp theo
                 w_global_prev = w_global_cur
@@ -631,7 +682,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Defense Capability Evaluation for LCN")
     parser.add_argument("--dataset",    default="cifar10",
-                        choices=["cifar10", "tinyimagenet"])
+                        choices=["mnist", "cifar10", "cifar100",
+                                 "lfw", "tinyimagenet"])
     parser.add_argument("--model",      default="mobilenet",
                         choices=["mobilenet", "resnet18", "lenet"])
     parser.add_argument("--attack",     default="idlg",

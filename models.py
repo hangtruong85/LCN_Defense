@@ -34,7 +34,7 @@ class LeNet(nn.Module):
 
 
 def get_model(name: str, num_classes: int = 10,
-              img_size: int = 32) -> nn.Module:
+              img_size: int = 32, channel: int = 3) -> nn.Module:
     """
     Trả về model với output dimension đúng.
 
@@ -47,10 +47,10 @@ def get_model(name: str, num_classes: int = 10,
 
     if name == "lenet":
         # hidden = 12 * (img_size//4) * (img_size//4)
-        # với img_size=32: 12*8*8=768; img_size=64: 12*16*16=3072
+        # img_size=28(MNIST):7x7=588, img_size=32:8x8=768, img_size=64:16x16=3072
         h = img_size // 4
         hidden = 12 * h * h
-        model = LeNet(channel=3, hidden=hidden, num_classes=num_classes)
+        model = LeNet(channel=channel, hidden=hidden, num_classes=num_classes)
         # Weight init đúng theo iDLG paper gốc
         for m in model.modules():
             try:
