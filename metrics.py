@@ -82,6 +82,21 @@ def compute_lpips(img1_tensor, img2_tensor, lpips_fn, device):
     x = _to_lpips_range(img1_tensor).unsqueeze(0).to(device)
     y = _to_lpips_range(img2_tensor).unsqueeze(0).to(device)
 
+    # LPIPS (AlexNet) cần ảnh ít nhất 32x32
+    # MNIST (28x28) hoặc ảnh nhỏ hơn cần được resize
+    min_size = 32
+    if x.shape[-1] < min_size or x.shape[-2] < min_size:
+        import torch.nn.functional as F
+        x = F.interpolate(x, size=(min_size, min_size),
+                          mode="bilinear", align_corners=False)
+        y = F.interpolate(y, size=(min_size, min_size),
+                          mode="bilinear", align_corners=False)
+
+    # MNIST là grayscale (1 channel) — LPIPS cần 3 channels
+    if x.shape[1] == 1:
+        x = x.repeat(1, 3, 1, 1)
+        y = y.repeat(1, 3, 1, 1)
+
     with torch.no_grad():
         val = lpips_fn(x, y)
     return float(val.item())

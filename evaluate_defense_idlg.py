@@ -238,8 +238,10 @@ def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
 
     elif name == "lfw":
         # LFW: 32x32 RGB, 5749 classes — đúng theo iDLG paper gốc
+        # Một số ảnh LFW là grayscale → convert sang RGB trước
         transform = transforms.Compose([
             transforms.Resize((32, 32)),
+            transforms.Lambda(lambda img: img.convert("RGB")),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ])
@@ -284,7 +286,11 @@ def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
-    indices = random.sample(range(len(dataset)), n_samples)
+    actual = min(n_samples, len(dataset))
+    if actual < n_samples:
+        _log(f"WARNING: dataset chỉ có {len(dataset)} ảnh, "
+             f"giảm n_samples từ {n_samples} xuống {actual}")
+    indices = random.sample(range(len(dataset)), actual)
     return Subset(dataset, indices)
 
 
@@ -458,12 +464,18 @@ def _save_image_pair(orig_tensor, rec_tensor, save_dir,
     import numpy as np
 
     def _to_pil(t, ds=None):
-        """CHW tensor → PIL Image dùng min-max (iDLG)."""
+        """CHW tensor → PIL Image dùng min-max (iDLG).
+        Xử lý grayscale (1 channel) và RGB (3 channel).
+        """
         t = t.detach().cpu().float()
         t = (t - t.min()) / (t.max() - t.min() + 1e-8)
         t = t.clamp(0, 1)
         arr = (t.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-        return PILImage.fromarray(arr)
+        if arr.shape[2] == 1:
+            # Grayscale: (H,W,1) → (H,W) → PIL mode "L"
+            return PILImage.fromarray(arr.squeeze(2), mode="L")
+        else:
+            return PILImage.fromarray(arr)
 
     param_str = str(param).replace(".", "p") if param is not None else "none"
     cond_str  = f"{defense}_{param_str}"
@@ -479,6 +491,12 @@ def _save_image_pair(orig_tensor, rec_tensor, save_dir,
 
     orig_pil = _to_pil(orig_tensor, ds=dataset)
     rec_pil  = _to_pil(rec_tensor, ds=dataset)
+
+    # Convert grayscale → RGB để đồng nhất khi lưu và ghép
+    if orig_pil.mode == "L":
+        orig_pil = orig_pil.convert("RGB")
+    if rec_pil.mode == "L":
+        rec_pil  = rec_pil.convert("RGB")
 
     # Save individual images at exact native resolution
     orig_pil.save(os.path.join(orig_dir, fname))
