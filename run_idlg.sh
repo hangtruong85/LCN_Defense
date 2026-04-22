@@ -15,9 +15,9 @@
 set -e
 
 QUICK=0
-IDLG_LR=0.1
+IDLG_LR=0.01
 IDLG_ITER=500
-N_SAMPLES=10
+N_SAMPLES=1
 
 # ── Parse arguments ────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do

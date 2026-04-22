@@ -1,4 +1,12 @@
 """
+evaluate_defense_idlg.py
+========================
+Đánh giá defense capability với iDLG attack.
+GIỮ NGUYÊN những gì đã chạy tốt — không thay đổi logic iDLG.
+
+Dùng: python evaluate_defense_idlg.py --dataset cifar10 --model lenet ...
+"""
+"""
 Evaluations on Defense Capability
 ===================================
 Evaluates LCN defense against:
@@ -23,9 +31,22 @@ import torchvision.utils as vutils
 from torch.utils.data import DataLoader, Subset
 
 from models import get_model
-from attacks import ig_attack, idlg_attack, set_attack_logger, set_loss_dir
+from attacks_idlg import idlg_attack
+from attacks_common import set_attack_logger, set_loss_dir
 from metrics import compute_psnr, compute_ssim, compute_lpips
 from lcn import apply_lcn, apply_dp_noise, generate_betas, compute_agg_prev
+
+# Normalization stats cho từng dataset
+DATASET_STATS = {
+    "cifar10": {
+        "mean": (0.4914, 0.4822, 0.4465),
+        "std":  (0.2023, 0.1994, 0.2010),
+    },
+    "tinyimagenet": {
+        "mean": (0.485, 0.456, 0.406),
+        "std":  (0.229, 0.224, 0.225),
+    },
+}
 
 
 # ─────────────────────────────────────────────
@@ -53,10 +74,23 @@ def _log(msg):
 # Reproducibility
 # ─────────────────────────────────────────────
 def set_seed(seed=42):
-    random.seed(seed)
+    """Fix seed cho model weights, gradient, torch ops — reproducible."""
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    # KHÔNG fix random.seed ở đây để image selection luôn random
+
+
+def set_image_seed(seed=None):
+    """
+    Fix seed cho việc chọn ảnh.
+    seed=None → random theo timestamp (khác nhau mỗi lần).
+    seed=int  → reproduce đúng bộ ảnh đó.
+    """
+    import time as _t
+    s = seed if seed is not None else int(_t.time() * 1000) % 1_000_000
+    random.seed(s)
+    return s
 
 
 # ─────────────────────────────────────────────
@@ -259,7 +293,7 @@ def evaluate_single(model, image, label, device, defense, param,
                     attack_type, lcn_state, lpips_fn, img_idx,
                     n_images, cond_label, save_dir=None,
                     model_name="mobilenet", img_size=32, n_clients=5,
-                    idlg_lr=1.0, idlg_iter=300):
+                    idlg_lr=1.0, idlg_iter=300, _dataset="cifar10"):
     """
     lcn_state : dict với keys 'w_cur', 'w_prev', 'beta_k', 'm'
                 dùng cho LCN defense; None cho các defense khác.
@@ -314,11 +348,7 @@ def evaluate_single(model, image, label, device, defense, param,
 
     _log(f"      [{cond_label}] img {img_idx}/{n_images} — running {attack_type.upper()} attack...")
     t0 = time.time()
-    if attack_type == "ig":
-        reconstructed = ig_attack(model_copy, observed_grad, image, device,
-                                   original_label=label,
-                                   run_tag=tag)
-    elif attack_type == "idlg":
+    if attack_type == "idlg":
         reconstructed = idlg_attack(model_copy, observed_grad, image,
                                      label, device,
                                      lr=idlg_lr,
@@ -330,8 +360,8 @@ def evaluate_single(model, image, label, device, defense, param,
     _log(f"      [{cond_label}] img {img_idx}/{n_images} — attack done in {atk_elapsed:.1f}s")
 
     # Metrics
-    orig_np = _to_numpy(image)
-    rec_np  = _to_numpy(reconstructed)
+    orig_np = _to_numpy(image, dataset=_dataset)
+    rec_np  = _to_numpy(reconstructed, dataset=_dataset)
     psnr    = compute_psnr(orig_np, rec_np)
     ssim    = compute_ssim(orig_np, rec_np)
     lpips   = compute_lpips(image, reconstructed, lpips_fn, device)
@@ -342,7 +372,8 @@ def evaluate_single(model, image, label, device, defense, param,
     # Save images
     if save_dir is not None:
         _save_image_pair(image, reconstructed, save_dir,
-                         defense, param, img_idx, attack_type)
+                         defense, param, img_idx, attack_type,
+                         dataset=_dataset)
         _log(f"      [{cond_label}] img {img_idx}/{n_images} — images saved.")
 
     return {"psnr": psnr, "ssim": ssim, "lpips": lpips}
@@ -351,7 +382,8 @@ def evaluate_single(model, image, label, device, defense, param,
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
-def _to_numpy(tensor):
+def _to_numpy(tensor, dataset="cifar10"):
+    """CHW tensor → HWC float32 in [0,1] dùng min-max (iDLG)."""
     t = tensor.detach().cpu().float()
     t = (t - t.min()) / (t.max() - t.min() + 1e-8)
     return t.permute(1, 2, 0).numpy()
@@ -365,7 +397,8 @@ def _num_classes(model):
 
 
 def _save_image_pair(orig_tensor, rec_tensor, save_dir,
-                     defense, param, img_idx, attack_type):
+                     defense, param, img_idx, attack_type,
+                     dataset="cifar10"):  # dataset unused in iDLG version
     """
     Save original and reconstructed images at native resolution (no resize).
     Folder structure:
@@ -377,12 +410,11 @@ def _save_image_pair(orig_tensor, rec_tensor, save_dir,
     from PIL import Image as PILImage
     import numpy as np
 
-    def _to_pil(t):
-        """CHW tensor → PIL Image at native resolution."""
+    def _to_pil(t, ds=None):
+        """CHW tensor → PIL Image dùng min-max (iDLG)."""
         t = t.detach().cpu().float()
         t = (t - t.min()) / (t.max() - t.min() + 1e-8)
         t = t.clamp(0, 1)
-        # CHW → HWC, scale to uint8
         arr = (t.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         return PILImage.fromarray(arr)
 
@@ -398,8 +430,8 @@ def _save_image_pair(orig_tensor, rec_tensor, save_dir,
     fname     = f"img_{img_idx:03d}_{attack_type}.png"
     cmp_fname = f"img_{img_idx:03d}_{cond_str}_{attack_type}.png"
 
-    orig_pil = _to_pil(orig_tensor)
-    rec_pil  = _to_pil(rec_tensor)
+    orig_pil = _to_pil(orig_tensor, ds=dataset)
+    rec_pil  = _to_pil(rec_tensor, ds=dataset)
 
     # Save individual images at exact native resolution
     orig_pil.save(os.path.join(orig_dir, fname))
@@ -420,6 +452,9 @@ def run_evaluation(args):
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Seed riêng cho chọn ảnh — random mỗi lần trừ khi chỉ định --img_seed
+    img_seed = set_image_seed(getattr(args, "img_seed", None))
+
     # Resolve run directory
     if args.run_dir:
         run_dir = args.run_dir
@@ -435,6 +470,7 @@ def run_evaluation(args):
     set_attack_logger(_log_file)  # share handle with attacks.py
 
     _log(f"Run directory: {run_dir}")
+    _log(f"Image seed: {img_seed}  (dùng --img_seed {img_seed} để reproduce)")
     set_loss_dir(os.path.join(run_dir, "loss_curves"))
     _log(f"Device: {device}")
     _log(f"Args: {vars(args)}")
@@ -498,10 +534,13 @@ def run_evaluation(args):
             psnr_list, ssim_list, lpips_list = [], [], []
 
             # Sinh beta cho m clients (trusted third party)
-            # beta_k[0] dùng cho client đang đánh giá (client 0)
+            # Beta do trusted third party phân phối ngẫu nhiên 1 lần
+            # seed=args.seed để reproduce được kết quả
             n_clients = 5  # khớp với setup FL
-            betas = generate_betas(n_clients, seed=42)
-            beta_k = betas[0]  # hệ số của client mục tiêu
+            betas  = generate_betas(n_clients, seed=args.seed)
+            beta_k = betas[0]  # client 0 là target client
+            _log(f"  [lcn] betas={[f'{b:.4f}' for b in betas]}  "
+                 f"beta_k={beta_k:.4f}")
 
             # w_prev: lưu global model của round trước
             # Khởi tạo bằng model hiện tại (round 0: w^(0) = w^(1))
@@ -537,7 +576,8 @@ def run_evaluation(args):
                     model_name=args.model, img_size=img_size,
                     n_clients=n_clients,
                     idlg_lr=args.idlg_lr,
-                    idlg_iter=args.idlg_iter)
+                    idlg_iter=args.idlg_iter,
+                    _dataset=args.dataset)
 
                 # Cập nhật w_prev cho ảnh tiếp theo
                 w_global_prev = w_global_cur
@@ -594,8 +634,8 @@ if __name__ == "__main__":
                         choices=["cifar10", "tinyimagenet"])
     parser.add_argument("--model",      default="mobilenet",
                         choices=["mobilenet", "resnet18", "lenet"])
-    parser.add_argument("--attack",     default="ig",
-                        choices=["ig", "idlg"])
+    parser.add_argument("--attack",     default="idlg",
+                        choices=["idlg"])
     parser.add_argument("--n_samples",  type=int, default=10)
     parser.add_argument("--checkpoint", default=None,
                         help="Path to pretrained model .pth file")
@@ -612,7 +652,11 @@ if __name__ == "__main__":
                         help="iDLG: number of L-BFGS iterations")
     parser.add_argument("--idlg_lr",    type=float, default=1.0,
                         help="iDLG: L-BFGS learning rate")
-    parser.add_argument("--seed",       type=int, default=42)
+    parser.add_argument("--seed",     type=int, default=42,
+                        help="Seed cho model/gradient (reproducible)")
+    parser.add_argument("--img_seed", type=int, default=None,
+                        help="Seed cho chọn ảnh (None=random mỗi lần, "
+                             "int=reproduce đúng bộ ảnh đó)")
     args = parser.parse_args()
 
     run_evaluation(args)

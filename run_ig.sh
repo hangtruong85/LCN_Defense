@@ -17,7 +17,7 @@ for arg in "$@"; do
 done
 
 # ── Tham số IG (đúng theo paper gốc) ──────────────────────────
-N_SAMPLES=10
+N_SAMPLES=1
 IG_ITER=24000
 IG_RESTARTS=8
 
@@ -53,10 +53,10 @@ CKPT_CIFAR10="./checkpoints/cifar10_mobilenet.pth"
 CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 
 CONFIGS=(
-  "cifar10      lenet     none"
-  "cifar10      mobilenet $CKPT_CIFAR10"
-  "cifar10      resnet18  none"
-  "tinyimagenet mobilenet none"
+  #"cifar10      lenet     none"
+  #"cifar10      mobilenet $CKPT_CIFAR10"
+  #"cifar10      resnet18  none"
+  #"tinyimagenet mobilenet none"
   "tinyimagenet resnet18  $CKPT_TINY"
 )
 
