@@ -205,7 +205,7 @@ def _download_tinyimagenet(data_root="./data"):
 # ─────────────────────────────────────────────
 # Dataset loader
 # ─────────────────────────────────────────────
-def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
+def get_dataset(name, n_samples=10, tinyimagenet_dir=None, lfw_dir=None):
     """Return a small subset of the test/val set for reconstruction evaluation."""
 
     if name == "mnist":
@@ -238,21 +238,83 @@ def get_dataset(name, n_samples=10, tinyimagenet_dir=None):
 
     elif name == "lfw":
         # LFW: 32x32 RGB, 5749 classes — đúng theo iDLG paper gốc
-        # Một số ảnh LFW là grayscale → convert sang RGB trước
+        #
+        # Ưu tiên 1: thư mục đã download thủ công (ImageFolder)
+        #   Cấu trúc cần: <lfw_dir>/<person_name>/<image>.jpg
+        #   Download từ: https://archive.org/download/lfw-dataset/lfw.tgz
+        #                hoặc Kaggle: jessicali9530/lfw-dataset
+        #
+        # Ưu tiên 2: scikit-learn fetch_lfw_people (tự download ~200MB)
         transform = transforms.Compose([
             transforms.Resize((32, 32)),
             transforms.Lambda(lambda img: img.convert("RGB")),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ])
-        dataset = torchvision.datasets.LFWPeople(
-            root="./data", split="test", download=True, transform=transform)
-        # LFWPeople có thể ít ảnh trong test split — fallback sang train
-        if len(dataset) < n_samples:
-            _log(f"LFW test split chỉ có {len(dataset)} ảnh, "
-                 f"dùng train split thay thế")
-            dataset = torchvision.datasets.LFWPeople(
-                root="./data", split="train", download=True, transform=transform)
+
+        # Ưu tiên 1: ImageFolder từ thư mục đã có
+        lfw_candidates = (
+            [lfw_dir] if lfw_dir else []
+        ) + [
+            "./data/lfw",
+            "../data/lfw",
+            "/data/lfw",
+            "/home/hangttt/data/lfw",
+        ]
+        lfw_root = None
+        for c in lfw_candidates:
+            if os.path.isdir(c):
+                lfw_root = c
+                break
+
+        if lfw_root is not None:
+            _log(f"LFW: dùng ImageFolder từ {lfw_root}")
+            dataset = torchvision.datasets.ImageFolder(
+                root=lfw_root, transform=transform)
+            _log(f"LFW: {len(dataset.classes)} classes, {len(dataset)} images")
+
+        else:
+            # Ưu tiên 2: sklearn fetch_lfw_people (tự download)
+            _log("LFW: không tìm thấy thư mục cục bộ → "
+                 "dùng sklearn.datasets.fetch_lfw_people (tự download ~200MB)")
+            try:
+                from sklearn.datasets import fetch_lfw_people
+                import numpy as np
+                from PIL import Image as _PIL
+                from torch.utils.data import TensorDataset
+
+                lfw_sk = fetch_lfw_people(
+                    color=True,
+                    resize=1.0,       # giữ nguyên 62x47, resize sau bằng transform
+                    min_faces_per_person=1,
+                    data_home="./data/sklearn_lfw",
+                )
+                # lfw_sk.images: (N, H, W, 3) float32 [0,1]
+                # lfw_sk.target: (N,) int
+                _log(f"LFW sklearn: {lfw_sk.images.shape[0]} ảnh, "
+                     f"{len(lfw_sk.target_names)} classes")
+
+                # Convert sang PIL → áp transform
+                imgs, labels = [], []
+                for img_arr, lbl in zip(lfw_sk.images, lfw_sk.target):
+                    pil = _PIL.fromarray(
+                        (img_arr * 255).astype(np.uint8))
+                    imgs.append(transform(pil))
+                    labels.append(int(lbl))
+
+                imgs_t   = torch.stack(imgs)     # (N, 3, 32, 32)
+                labels_t = torch.tensor(labels)  # (N,)
+                dataset  = TensorDataset(imgs_t, labels_t)
+
+            except ImportError:
+                raise ImportError(
+                    "scikit-learn chưa được cài.\n"
+                    "Chạy: pip install scikit-learn\n"
+                    "Hoặc download LFW thủ công:\n"
+                    "  wget https://archive.org/download/lfw-dataset/lfw.tgz\n"
+                    "  tar -xzf lfw.tgz -C ./data/\n"
+                    "Rồi truyền: --lfw_dir ./data/lfw"
+                )
 
     elif name == "tinyimagenet":
         transform = transforms.Compose([
@@ -547,8 +609,9 @@ def run_evaluation(args):
 
     _log(f"Loading dataset: {args.dataset}  (n_samples={args.n_samples})")
     tiny_dir = getattr(args, "tinyimagenet_dir", None)
+    lfw_dir  = getattr(args, "lfw_dir", None)
     dataset  = get_dataset(args.dataset, n_samples=args.n_samples,
-                           tinyimagenet_dir=tiny_dir)
+                           tinyimagenet_dir=tiny_dir, lfw_dir=lfw_dir)
     loader  = DataLoader(dataset, batch_size=1, shuffle=False)
     _log(f"Dataset ready: {len(dataset)} images selected.")
 
@@ -712,6 +775,9 @@ if __name__ == "__main__":
     parser.add_argument("--tinyimagenet_dir", default=None,
                         help="Path to Tiny-ImageNet val directory "
                              "(e.g. /data/tiny-imagenet-200/val)")
+    parser.add_argument("--lfw_dir", default=None,
+                        help="Path to LFW directory "
+                             "(e.g. /data/lfw). Cấu trúc: lfw/<person>/<img>.jpg")
     parser.add_argument("--output_dir", default="./results",
                         help="Base results dir (ignored if --run_dir is set)")
     parser.add_argument("--run_dir",    default=None,

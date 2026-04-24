@@ -37,6 +37,30 @@ echo " FL Training — generating checkpoints for defense evaluation"
 echo " Checkpoints will be saved to: $CKPT_DIR"
 echo "============================================================"
 
+# ── Tiny-ImageNet / MobileNet ─────────────────────────────────────────
+if [ $DO_CIFAR -eq 1 ]; then
+  echo ""
+  echo ">>> [1/2] Tiny-ImageNet / MobileNet  (${N_CLIENTS} clients, ${ROUNDS} rounds)"
+  python train_fl.py \
+    --dataset      tinyimagenet \
+    --model        mobilenet \
+    --defense      none \
+    --n_clients    $N_CLIENTS \
+    --rounds       $ROUNDS \
+    --local_epochs 1 \
+    --local_bs     64 \
+    --lr           1e-3 \
+    --ckpt_dir     $CKPT_DIR \
+    --output_dir   $LOG_DIR \
+    --seed         42
+
+  echo ""
+  echo "    Checkpoint saved: $CKPT_DIR/tinyimagenet_mobilenet.pth"
+fi
+
+# Chạy mỗi tinyimagenet - mobilenet thôi
+exit 0
+
 # ── CIFAR-10 / MobileNet ─────────────────────────────────────────
 if [ $DO_CIFAR -eq 1 ]; then
   echo ""

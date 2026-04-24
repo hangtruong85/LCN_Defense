@@ -18,7 +18,7 @@ done
 
 # ── Tham số IG (đúng theo paper gốc) ──────────────────────────
 N_SAMPLES=1
-IG_ITER=24000
+IG_ITER=8000
 IG_RESTARTS=8
 
 if [ $QUICK -eq 1 ]; then
@@ -54,10 +54,10 @@ CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 
 CONFIGS=(
   #"cifar10      lenet     none"
-  "cifar10      mobilenet $CKPT_CIFAR10"
+  #"cifar10      mobilenet $CKPT_CIFAR10"
   #"cifar10      resnet18  none"
   #"tinyimagenet mobilenet none"
-  #"tinyimagenet resnet18  $CKPT_TINY"
+  "tinyimagenet resnet18  $CKPT_TINY"
 )
 
 # ── STEP 1: Quantitative evaluation ───────────────────────────
@@ -81,7 +81,7 @@ for CFG in "${CONFIGS[@]}"; do
     --n_samples "$N_SAMPLES" \
     $CKPT_ARG \
     --run_dir   "$RUN_DIR" \
-    --seed      42
+    --seed      52
 done
 
 # ── STEP 2: Summary figures ────────────────────────────────────
@@ -92,7 +92,7 @@ echo "============================================================"
 
 python make_figures.py \
   --run_dir "$RUN_DIR" \
-  --n_show  4
+  --n_show  5
 
 # ── STEP 3: LaTeX tables ───────────────────────────────────────
 echo ""

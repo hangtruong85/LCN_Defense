@@ -61,9 +61,9 @@ CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 
 # LeNet (iDLG paper gốc) — không cần checkpoint, dùng random weights
 CONFIGS_LENET=(
-  "mnist     lenet  none"
-  "cifar10   lenet  none"
-  "cifar100  lenet  none"
+  #"mnist     lenet  none"
+  #"cifar10   lenet  none"
+  #"cifar100  lenet  none"
   "lfw       lenet  none"
 )
 
@@ -113,6 +113,9 @@ echo "============================================================"
 
 python make_figures.py \
   --run_dir "$RUN_DIR" \
+  --n_show  5
+  python make_figures.py \
+  --run_dir "results/idlg_20260422_132132" \
   --n_show  5
 
 # ── STEP 3: LaTeX tables ───────────────────────────────────────
