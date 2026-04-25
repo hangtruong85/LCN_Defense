@@ -62,9 +62,9 @@ CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 # LeNet (iDLG paper gốc) — không cần checkpoint, dùng random weights
 CONFIGS_LENET=(
   #"mnist     lenet  none"
-  #"cifar10   lenet  none"
+  "cifar10   lenet  none"
   #"cifar100  lenet  none"
-  "lfw       lenet  none"
+  #"lfw       lenet  none"
 )
 
 # MobileNet / ResNet18 — cần checkpoint đã train
@@ -76,7 +76,7 @@ CONFIGS_PRETRAINED=(
 # Gộp tất cả: LeNet trước, sau đó pretrained
 CONFIGS=(
   "${CONFIGS_LENET[@]}"
-  "${CONFIGS_PRETRAINED[@]}"
+  #"${CONFIGS_PRETRAINED[@]}"
 )
 
 # ── STEP 1: Quantitative evaluation ───────────────────────────

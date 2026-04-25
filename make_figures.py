@@ -32,7 +32,9 @@ import matplotlib.gridspec as gridspec
 
 
 # ── Tên hiển thị cho từng condition ──────────────────────────────
+# Key = tên thư mục thực tế (defense_paramstr, chữ thường)
 COND_LABELS = {
+    "none_none":   "No Defense",
     "none_None":   "No Defense",
     "dp_0p001":    "DP σ=1e-3",
     "dp_0p01":     "DP σ=1e-2",
@@ -42,9 +44,10 @@ COND_LABELS = {
     "lcn_0p5":     "LCN α=0.5",
 }
 
-# Thứ tự hiển thị cột
+# Thứ tự hiển thị cột — none_none LUÔN đứng đầu (cột 2, sau Original)
 COND_ORDER = [
-    "none_None",
+    "none_none",   # No Defense — ưu tiên cao nhất
+    "none_None",   # tương thích ngược nếu thư mục cũ dùng chữ hoa
     "dp_0p001", "dp_0p01",
     "lcn_1p1", "lcn_0p9", "lcn_0p7", "lcn_0p5",
 ]
@@ -67,18 +70,27 @@ def find_image_sets(images_root):
 
 def get_sorted_conditions(img_dir):
     """
-    Trả về list các condition subdirs theo COND_ORDER,
-    chỉ lấy những cái thực sự tồn tại.
+    Trả về list các condition subdirs theo COND_ORDER.
+    - none_none (No Defense) luôn đứng đầu (cột 2 sau Original)
+    - Title hiển thị từ COND_LABELS, không dùng tên thư mục raw
+    - Bỏ duplicate (tránh trường hợp cả none_none và none_None cùng tồn tại)
     """
-    existing = [d for d in os.listdir(img_dir)
-                if os.path.isdir(os.path.join(img_dir, d)) and d != "orig"
-                   and d != "comparison"]
-    # Sắp xếp theo COND_ORDER
-    ordered = [c for c in COND_ORDER if c in existing]
+    existing = set(
+        d for d in os.listdir(img_dir)
+        if os.path.isdir(os.path.join(img_dir, d))
+        and d not in ("orig", "comparison")
+    )
+    seen    = set()
+    ordered = []
+    for c in COND_ORDER:
+        if c in existing and c not in seen:
+            ordered.append(c)
+            seen.add(c)
     # Thêm các cond không có trong COND_ORDER vào cuối
     for c in sorted(existing):
-        if c not in ordered:
+        if c not in seen:
             ordered.append(c)
+            seen.add(c)
     return ordered
 
 

@@ -11,7 +11,7 @@ QUICK=""
 for arg in "$@"; do
   [ "$arg" == "--quick" ] && QUICK="--quick"
 done
-
+CKPT_TINY_MOBILE="./checkpoints/tinyimagenet_mobilenet.pth"
 CKPT_CIFAR10="./checkpoints/cifar10_mobilenet.pth"
 CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 
@@ -19,7 +19,7 @@ CKPT_TINY="./checkpoints/tinyimagenet_resnet18.pth"
 CONFIGS=(
   #"cifar10      ResNet18  none"
   #"cifar10      MobileNet $CKPT_CIFAR10"
-  "tinyimagenet      MobileNet $CKPT_CIFAR10"
+  "tinyimagenet      MobileNet $CKPT_TINY_MOBILE"
   #"tinyimagenet ResNet18  $CKPT_TINY"
 )
 
