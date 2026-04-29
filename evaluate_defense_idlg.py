@@ -34,7 +34,7 @@ from models import get_model
 from attacks_idlg import idlg_attack
 from attacks_common import set_attack_logger, set_loss_dir
 from metrics import compute_psnr, compute_ssim, compute_lpips
-from lcn import apply_lcn, apply_dp_noise, generate_betas, compute_agg_prev
+from lcn import apply_lcn, apply_dp_noise, generate_betas, compute_agg_prev, set_beta_k
 
 # Config cho từng dataset (đúng theo iDLG paper gốc)
 DATASET_STATS = {
@@ -641,7 +641,16 @@ def run_evaluation(args):
     ]
 
     n_conditions = len(conditions)
-    n_images     = args.n_samples
+    # Song song: nếu --img_index được chỉ định thì chỉ xử lý 1 ảnh
+    if getattr(args, "img_index", None) is not None:
+        img_idx_filter = args.img_index
+        total = args.total_images or args.n_samples
+        _log(f"Parallel mode: processing image {img_idx_filter+1}/{total}")
+    else:
+        img_idx_filter = None
+        total = args.n_samples
+
+    n_images     = total
     results      = []
     total_start  = time.time()
 
@@ -665,11 +674,15 @@ def run_evaluation(args):
             psnr_list, ssim_list, lpips_list = [], [], []
 
             # Sinh beta cho m clients (trusted third party)
-            # Beta do trusted third party phân phối ngẫu nhiên 1 lần
-            # seed=args.seed để reproduce được kết quả
             n_clients = 5  # khớp với setup FL
-            betas  = generate_betas(n_clients, seed=args.seed)
-            beta_k = betas[0]  # client 0 là target client
+            if getattr(args, "beta_k", None) is not None:
+                # beta_k được chỉ định từ CLI — có thể âm, 0, dương
+                betas  = set_beta_k(args.beta_k, k=0, m=n_clients)
+                beta_k = betas[0]
+            else:
+                # Sinh ngẫu nhiên từ uniform simplex
+                betas  = generate_betas(n_clients, seed=args.seed)
+                beta_k = betas[0]
             _log(f"  [lcn] betas={[f'{b:.4f}' for b in betas]}  "
                  f"beta_k={beta_k:.4f}")
 
@@ -679,6 +692,10 @@ def run_evaluation(args):
                              for p in model.parameters()]
 
             for idx, (image, label) in enumerate(loader):
+                # Song song: bỏ qua ảnh không phải target
+                if img_idx_filter is not None and idx != img_idx_filter:
+                    continue
+
                 image = image.squeeze(0)
                 label = label.squeeze(0)
 
@@ -740,8 +757,16 @@ def run_evaluation(args):
             })
 
     # Save CSV
-    csv_path = os.path.join(run_dir,
-                            f"defense_capability_{args.dataset}_{args.model}.csv")
+    # Parallel mode: lưu partial file riêng mỗi ảnh
+    _beta_sfx = (f"_beta{args.beta_k}"
+                 if getattr(args, "beta_k", None) is not None else "")
+    if getattr(args, "img_index", None) is not None:
+        _csv_name = (f"partial_{args.dataset}_{args.model}"
+                     f"{_beta_sfx}_img{args.img_index:03d}.csv")
+    else:
+        _csv_name = (f"defense_capability_{args.dataset}"
+                     f"_{args.model}{_beta_sfx}.csv")
+    csv_path = os.path.join(run_dir, _csv_name)
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
         writer.writeheader()
@@ -788,11 +813,21 @@ if __name__ == "__main__":
                         help="iDLG: number of L-BFGS iterations")
     parser.add_argument("--idlg_lr",    type=float, default=1.0,
                         help="iDLG: L-BFGS learning rate")
+    parser.add_argument("--beta_k",   type=float, default=None,
+                        help="Giá trị beta_k cho target client. "
+                             "None = sinh ngẫu nhiên từ simplex. "
+                             "Có thể âm, bằng 0 hoặc dương.")
     parser.add_argument("--seed",     type=int, default=42,
                         help="Seed cho model/gradient (reproducible)")
     parser.add_argument("--img_seed", type=int, default=None,
                         help="Seed cho chọn ảnh (None=random mỗi lần, "
                              "int=reproduce đúng bộ ảnh đó)")
+    parser.add_argument("--img_index", type=int, default=None,
+                        help="Chỉ xử lý ảnh thứ N (0-indexed) trong danh sách. "
+                             "Dùng khi chạy song song: mỗi process xử lý 1 ảnh.")
+    parser.add_argument("--total_images", type=int, default=None,
+                        help="Tổng số ảnh cần evaluate. Dùng kết hợp với --img_index. "
+                             "Cần --img_seed cố định để tất cả process dùng cùng bộ ảnh.")
     args = parser.parse_args()
 
     run_evaluation(args)

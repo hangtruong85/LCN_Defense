@@ -18,7 +18,7 @@ Output:
 
 Usage:
     python make_figures.py --run_dir ./results/idlg_20260420_231356
-    python make_figures.py --run_dir ./results/idlg_20260420_231356 --n_show 4
+    python make_figures.py --run_dir ./results/defense_20260416_230248 --n_show 5
 """
 
 import os
